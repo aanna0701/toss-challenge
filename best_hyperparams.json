@@ -1,0 +1,14 @@
+{
+  "best_params": {
+    "learning_rate": 1.71621785407999e-05,
+    "batch_size": 512,
+    "lstm_hidden": 96,
+    "n_layers": 2,
+    "hidden_0": 640,
+    "hidden_1": 640,
+    "dropout": 0.4
+  },
+  "best_value": Infinity,
+  "n_trials": 305,
+  "timestamp": "2025-09-09T04:57:03.404261"
+}

@@ -1,0 +1,23 @@
+# 기본 훈련 설정
+BATCH_SIZE: 4096
+EPOCHS: 10
+LEARNING_RATE: 0.001
+SEED: 42
+
+# 검증 데이터 분할 비율
+VAL_SPLIT: 0.2
+
+# 모델 설정
+MODEL:
+  TYPE: "tabular_seq"  # 모델 타입
+  LSTM_HIDDEN: 64      # LSTM 히든 사이즈
+  HIDDEN_UNITS: [256, 128]  # MLP 히든 레이어 유닛 수들
+  DROPOUT: 0.2         # 드롭아웃 비율
+
+# 파일 경로 설정
+PATHS:
+  MODEL_SAVE: "trained_model.pth"
+  SUBMISSION: "baseline_submit.csv"
+  TRAIN_DATA: "./train.parquet"
+  TEST_DATA: "./test.parquet"
+  SAMPLE_SUBMISSION: "./sample_submission.csv"

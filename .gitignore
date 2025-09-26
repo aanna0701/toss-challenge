@@ -1,0 +1,4 @@
+results/
+*.parquet
+*.db
+.DS_Store

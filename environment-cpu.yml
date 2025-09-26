@@ -1,0 +1,41 @@
+name: toss-click-prediction-cpu
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.9.18
+
+  # PyTorch ecosystem (CPU only)
+  - pytorch=2.1.1
+  - torchvision=0.16.1
+  - cpuonly  # CPU-only PyTorch
+  
+  # Data processing
+  - pandas=2.1.3
+  - numpy=1.24.4
+  - pyarrow=14.0.1
+  
+  # Machine learning
+  - scikit-learn=1.3.2
+  
+  # Utilities
+  - tqdm=4.66.1
+  - pyyaml=6.0.1
+  
+  # Visualization
+  - matplotlib=3.7.2
+  - seaborn=0.12.2
+  
+  # Development tools
+  - jupyter=1.0.0
+  - ipykernel=6.26.0
+  
+  # Pip dependencies (not available in conda)
+  - pip=23.3.1
+  - pip:
+    - optuna==3.4.0
+    - plotly==5.17.0
+    - kaleido==0.2.1  # For plotly static image export
