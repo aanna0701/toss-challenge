@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
@@ -8,6 +9,10 @@ from data_loader import load_and_preprocess_data, create_data_loaders
 from model import *
 from early_stopping import create_early_stopping_from_config
 from metrics import evaluate_model, print_metrics, save_training_logs, get_best_checkpoint_info
+from gradient_norm import (
+    calculate_gradient_norms, print_gradient_norms, save_gradient_norm_logs,
+    analyze_gradient_behavior, print_gradient_analysis, check_gradient_issues, print_gradient_issues
+)
 
 def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     """모델 훈련 함수"""
@@ -50,21 +55,62 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
 
     # 훈련 로그 초기화
     training_logs = []
+    gradient_norm_logs = []
+
+    # Gradient norm 설정 확인
+    gradient_norm_enabled = CFG['GRADIENT_NORM']['ENABLED']
+    gradient_components = CFG['GRADIENT_NORM']['COMPONENTS']
+    
+    if gradient_norm_enabled:
+        print(f"📊 Gradient Norm 측정 활성화:")
+        print(f"   • 측정 구성 요소: {gradient_components}")
+        print(f"   • 로그 저장: {CFG['GRADIENT_NORM']['SAVE_LOGS']}")
 
     # 4) Training Loop
     for epoch in range(1, CFG['EPOCHS']+1):
         # 훈련 단계
         model.train()
         train_loss = 0.0
-        for xs, seqs, seq_lens, ys in tqdm(train_loader, desc=f"Train Epoch {epoch}"):
+        epoch_gradient_norms = []
+        
+        for batch_idx, (xs, seqs, seq_lens, ys) in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch}")):
             xs, seqs, seq_lens, ys = xs.to(device), seqs.to(device), seq_lens.to(device), ys.to(device)
             optimizer.zero_grad()
             logits = model(xs, seqs, seq_lens)
             loss = criterion(logits, ys)
             loss.backward()
+            
+            # Gradient norm 측정 (backward 후, step 전)
+            if gradient_norm_enabled:
+                gradient_norms = calculate_gradient_norms(model, gradient_components)
+                epoch_gradient_norms.append(gradient_norms)
+                
+                # 첫 번째 배치에서만 상세 출력
+                if batch_idx == 0:
+                    print_gradient_norms(gradient_norms, f"[Epoch {epoch}] ")
+                    
+                    # Gradient 문제 체크
+                    issues = check_gradient_issues(gradient_norms)
+                    print_gradient_issues(issues)
+            
             optimizer.step()
             train_loss += loss.item() * ys.size(0)
+        
         train_loss /= len(train_dataset)
+        
+        # 에포크별 평균 gradient norm 계산
+        if gradient_norm_enabled and epoch_gradient_norms:
+            avg_gradient_norms = {}
+            for component in gradient_components:
+                component_norms = [gn[component] for gn in epoch_gradient_norms if component in gn]
+                avg_gradient_norms[f'{component}_grad_norm'] = np.mean(component_norms) if component_norms else 0.0
+            
+            # Gradient norm 로그 저장
+            gradient_log_entry = {
+                'epoch': epoch,
+                **avg_gradient_norms
+            }
+            gradient_norm_logs.append(gradient_log_entry)
 
         # 검증 단계 및 메트릭 계산
         val_metrics = evaluate_model(model, val_loader, device)
@@ -109,6 +155,15 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             print(f"   • Val Score: {best_info['val_score']:.6f}")
             print(f"   • Val AP: {best_info['val_ap']:.6f}")
             print(f"   • Val WLL: {best_info['val_wll']:.6f}")
+
+    # Gradient norm 로그 저장 및 분석
+    if gradient_norm_enabled and CFG['GRADIENT_NORM']['SAVE_LOGS'] and gradient_norm_logs:
+        gradient_log_filepath = CFG['PATHS']['RESULTS_DIR'] + "/" + CFG['GRADIENT_NORM']['LOG_FILE']
+        save_gradient_norm_logs(gradient_norm_logs, gradient_log_filepath)
+        
+        # Gradient 행동 분석
+        gradient_analysis = analyze_gradient_behavior(gradient_norm_logs)
+        print_gradient_analysis(gradient_analysis)
 
     return model
 

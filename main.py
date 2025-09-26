@@ -23,6 +23,12 @@ CFG = {
         'SAVE_LOGS': True,
         'LOG_FILE': 'train_logs.csv'
     },
+    'GRADIENT_NORM': {
+        'ENABLED': True,
+        'SAVE_LOGS': True,
+        'LOG_FILE': 'gradient_norms.csv',
+        'COMPONENTS': ['lstm', 'mlp', 'total']
+    },
     'MODEL': {
         'TYPE': 'tabular_seq',
         'LSTM_HIDDEN': 64,

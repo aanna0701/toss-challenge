@@ -1,6 +1,6 @@
 # 기본 훈련 설정
 BATCH_SIZE: 4096
-EPOCHS: 10   # 메트릭 테스트용
+EPOCHS: 10
 LEARNING_RATE: 0.001
 SEED: 42
 
@@ -9,8 +9,8 @@ VAL_SPLIT: 0.2
 
 # 데이터 샘플링 설정
 DATA:
-  USE_SAMPLING: false      # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
-  SAMPLE_SIZE: 5000      # 샘플 크기 (행 수) - 메트릭 테스트용
+  USE_SAMPLING: false       # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
+  SAMPLE_SIZE: 3000       # 샘플 크기 (행 수) - gradient norm 테스트용
 
 # Early Stopping 설정
 EARLY_STOPPING:
@@ -25,6 +25,16 @@ EARLY_STOPPING:
 METRICS:
   SAVE_LOGS: true        # 훈련 로그 저장 여부
   LOG_FILE: "train_logs.csv"  # 로그 파일명
+
+# Gradient Norm 설정
+GRADIENT_NORM:
+  ENABLED: true          # Gradient norm 측정 활성화
+  SAVE_LOGS: true        # Gradient norm 로그 저장
+  LOG_FILE: "gradient_norms.csv"  # Gradient norm 로그 파일명
+  COMPONENTS:            # 측정할 모델 구성 요소들
+    - "lstm"            # LSTM 부분
+    - "mlp"             # MLP 부분
+    - "total"           # 전체 모델
 
 # 모델 설정
 MODEL:
