@@ -1,6 +1,6 @@
 # 기본 훈련 설정
 BATCH_SIZE: 4096
-EPOCHS: 5   # 메트릭 테스트용
+EPOCHS: 10   # 메트릭 테스트용
 LEARNING_RATE: 0.001
 SEED: 42
 
@@ -9,7 +9,7 @@ VAL_SPLIT: 0.2
 
 # 데이터 샘플링 설정
 DATA:
-  USE_SAMPLING: true      # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
+  USE_SAMPLING: false      # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
   SAMPLE_SIZE: 5000      # 샘플 크기 (행 수) - 메트릭 테스트용
 
 # Early Stopping 설정

@@ -9,10 +9,10 @@ from datetime import datetime
 import pandas as pd
 
 from main import CFG, device, initialize
-from data_loader import load_and_preprocess_data, create_data_loaders
+from data_loader import load_and_preprocess_data
 from model import *
 from train import train_model, save_model
-from predict import load_trained_model, predict_test_data
+from predict import predict_test_data
 
 
 def create_results_directory():
