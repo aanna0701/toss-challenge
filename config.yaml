@@ -9,14 +9,14 @@ VAL_SPLIT: 0.2
 
 # 데이터 샘플링 설정
 DATA:
-  USE_SAMPLING: true     # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
+  USE_SAMPLING: false     # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
   SAMPLE_SIZE: 10000     # 샘플 크기 (행 수) - 테스트용
 
 # Early Stopping 설정
 EARLY_STOPPING:
   ENABLED: true          # Early stopping 사용 여부
   PATIENCE: 3            # 개선이 없는 에포크 수 (patience) - 테스트용
-  MIN_DELTA: 0.001       # 개선으로 인정할 최소 변화량
+  MIN_DELTA: 0.00001       # 개선으로 인정할 최소 변화량
   MONITOR: "val_loss"    # 모니터링할 메트릭 (val_loss, val_accuracy 등)
   MODE: "min"           # 모니터링 모드 (min: 감소, max: 증가)
   RESTORE_BEST_WEIGHTS: true  # 최고 성능 가중치 복원 여부
