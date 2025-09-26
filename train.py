@@ -7,6 +7,7 @@ from main import CFG, device, initialize
 from data_loader import load_and_preprocess_data, create_data_loaders
 from model import *
 from early_stopping import create_early_stopping_from_config
+from metrics import evaluate_model, print_metrics, save_training_logs, get_best_checkpoint_info
 
 def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     """모델 훈련 함수"""
@@ -47,8 +48,12 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     else:
         print("🚀 Early Stopping 비활성화 - 전체 에포크 훈련")
 
+    # 훈련 로그 초기화
+    training_logs = []
+
     # 4) Training Loop
     for epoch in range(1, CFG['EPOCHS']+1):
+        # 훈련 단계
         model.train()
         train_loss = 0.0
         for xs, seqs, seq_lens, ys in tqdm(train_loader, desc=f"Train Epoch {epoch}"):
@@ -61,21 +66,28 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             train_loss += loss.item() * ys.size(0)
         train_loss /= len(train_dataset)
 
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for xs, seqs, seq_lens, ys in tqdm(val_loader, desc=f"Val Epoch {epoch}"):
-                xs, seqs, seq_lens, ys = xs.to(device), seqs.to(device), seq_lens.to(device), ys.to(device)
-                logits = model(xs, seqs, seq_lens)
-                loss = criterion(logits, ys)
-                val_loss += loss.item() * len(ys)
-        val_loss /= len(val_dataset)
-
-        print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        # 검증 단계 및 메트릭 계산
+        val_metrics = evaluate_model(model, val_loader, device)
         
-        # Early Stopping 체크
+        # 로그 출력
+        print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}")
+        print_metrics(val_metrics, "Val ")
+        
+        # 훈련 로그 저장
+        log_entry = {
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'val_loss': val_metrics['loss'],
+            'val_ap': val_metrics['ap'],
+            'val_wll': val_metrics['wll'],
+            'val_score': val_metrics['score']
+        }
+        training_logs.append(log_entry)
+        
+        # Early Stopping 체크 (Score 기준)
+        monitor_value = val_metrics[CFG['EARLY_STOPPING']['MONITOR'].replace('val_', '')]
         if early_stopping:
-            if early_stopping(val_loss, model):
+            if early_stopping(monitor_value, model):
                 print(f"🏁 훈련 조기 종료 (Epoch {epoch}/{CFG['EPOCHS']})")
                 break
 
@@ -83,6 +95,20 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     if early_stopping:
         best_score = early_stopping.get_best_score()
         print(f"🏆 최고 성능: {CFG['EARLY_STOPPING']['MONITOR']} = {best_score:.6f}")
+
+    # 훈련 로그 저장
+    if CFG['METRICS']['SAVE_LOGS']:
+        log_filepath = CFG['PATHS']['RESULTS_DIR'] + "/" + CFG['METRICS']['LOG_FILE']
+        save_training_logs(training_logs, log_filepath)
+        
+        # 최고 성능 정보 출력
+        best_info = get_best_checkpoint_info(training_logs)
+        if best_info:
+            print(f"🏆 최고 성능 체크포인트:")
+            print(f"   • Epoch: {best_info['epoch']}")
+            print(f"   • Val Score: {best_info['val_score']:.6f}")
+            print(f"   • Val AP: {best_info['val_ap']:.6f}")
+            print(f"   • Val WLL: {best_info['val_wll']:.6f}")
 
     return model
 

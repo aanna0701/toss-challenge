@@ -157,7 +157,10 @@ def main():
             'batch_size': CFG['BATCH_SIZE'],
             'train_shape': train_data.shape,
             'test_shape': test_data.shape,
-            'num_features': len(feature_cols)
+            'num_features': len(feature_cols),
+            'early_stopping': CFG['EARLY_STOPPING']['ENABLED'],
+            'monitor_metric': CFG['EARLY_STOPPING']['MONITOR'],
+            'patience': CFG['EARLY_STOPPING']['PATIENCE']
         }
         print_step_summary("정보 수집", {
             "Model Parameters": len(model_info),

@@ -15,9 +15,13 @@ CFG = {
         'ENABLED': True,
         'PATIENCE': 5,
         'MIN_DELTA': 0.001,
-        'MONITOR': 'val_loss',
-        'MODE': 'min',
+        'MONITOR': 'val_score',
+        'MODE': 'max',
         'RESTORE_BEST_WEIGHTS': True
+    },
+    'METRICS': {
+        'SAVE_LOGS': True,
+        'LOG_FILE': 'train_logs.csv'
     },
     'MODEL': {
         'TYPE': 'tabular_seq',
