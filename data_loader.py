@@ -64,23 +64,54 @@ def collate_fn_infer(batch):
 
 def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target_col, batch_size):
     """데이터로더 생성 함수"""
-    # Train/Val datasets
-    train_dataset = ClickDataset(train_df, feature_cols, seq_col, target_col, has_target=True)
-    val_dataset = ClickDataset(val_df, feature_cols, seq_col, target_col, has_target=True)
+    import pandas as pd
     
-    # Test dataset
-    test_dataset = ClickDataset(test_df, feature_cols, seq_col, has_target=False)
+    # Train dataset (train_df가 None이면 더미 데이터셋 생성)
+    if train_df is not None and len(train_df) > 0:
+        train_dataset = ClickDataset(train_df, feature_cols, seq_col, target_col, has_target=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
+    else:
+        # 더미 데이터 생성 (최소 1개 행)
+        dummy_data = {col: [0.0] for col in feature_cols}
+        dummy_data[seq_col] = ["0.0"]
+        dummy_data[target_col] = [0.0]
+        dummy_train_df = pd.DataFrame(dummy_data)
+        train_dataset = ClickDataset(dummy_train_df, feature_cols, seq_col, target_col, has_target=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
     
-    # DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_train)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
+    # Val dataset (val_df가 None이면 더미 데이터셋 생성)
+    if val_df is not None and len(val_df) > 0:
+        val_dataset = ClickDataset(val_df, feature_cols, seq_col, target_col, has_target=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_train)
+    else:
+        # 더미 데이터 생성 (최소 1개 행)
+        dummy_data = {col: [0.0] for col in feature_cols}
+        dummy_data[seq_col] = ["0.0"]
+        dummy_data[target_col] = [0.0]
+        dummy_val_df = pd.DataFrame(dummy_data)
+        val_dataset = ClickDataset(dummy_val_df, feature_cols, seq_col, target_col, has_target=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_train)
+    
+    # Test dataset (test_df가 None이면 더미 데이터셋 생성)
+    if test_df is not None:
+        test_dataset = ClickDataset(test_df, feature_cols, seq_col, has_target=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
+    else:
+        dummy_test_df = pd.DataFrame(columns=feature_cols + [seq_col])
+        test_dataset = ClickDataset(dummy_test_df, feature_cols, seq_col, has_target=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
     
     return train_loader, val_loader, test_loader, train_dataset, val_dataset
 
-def load_and_preprocess_data(use_sampling=True, sample_size=1000000):
+def load_and_preprocess_data(use_sampling=None, sample_size=None):
     """데이터 로드 및 전처리 함수"""
     from main import CFG
+    
+    # config에서 샘플링 설정 가져오기 (매개변수가 없으면 config 사용)
+    if use_sampling is None:
+        use_sampling = CFG['DATA']['USE_SAMPLING']
+    if sample_size is None:
+        sample_size = CFG['DATA']['SAMPLE_SIZE']
     
     def safe_load_parquet(file_path, sample_size=None):
         """안전한 parquet 로드 함수"""

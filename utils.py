@@ -3,6 +3,7 @@ import random
 import numpy as np
 import torch
 import yaml
+from datetime import datetime
 
 def seed_everything(seed):
     """시드 고정 함수"""
@@ -79,3 +80,17 @@ def print_valid_keys(config):
 def get_device():
     """사용 가능한 디바이스 반환"""
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+def apply_datetime_to_paths(config):
+    """설정에서 {datetime} 플레이스홀더를 실제 datetime으로 교체하는 함수"""
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    def replace_datetime_in_dict(d):
+        for key, value in d.items():
+            if isinstance(value, dict):
+                replace_datetime_in_dict(value)
+            elif isinstance(value, str) and "{datetime}" in value:
+                d[key] = value.replace("{datetime}", current_time)
+    
+    replace_datetime_in_dict(config)
+    return config

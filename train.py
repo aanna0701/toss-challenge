@@ -6,6 +6,7 @@ from tqdm import tqdm
 from main import CFG, device, initialize
 from data_loader import load_and_preprocess_data, create_data_loaders
 from model import *
+from early_stopping import create_early_stopping_from_config
 
 def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     """모델 훈련 함수"""
@@ -35,6 +36,17 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=CFG['LEARNING_RATE'])
 
+    # Early Stopping 설정
+    early_stopping = create_early_stopping_from_config(CFG)
+    if early_stopping:
+        print(f"🛑 Early Stopping 활성화:")
+        print(f"   • Monitor: {CFG['EARLY_STOPPING']['MONITOR']}")
+        print(f"   • Patience: {CFG['EARLY_STOPPING']['PATIENCE']}")
+        print(f"   • Min Delta: {CFG['EARLY_STOPPING']['MIN_DELTA']}")
+        print(f"   • Mode: {CFG['EARLY_STOPPING']['MODE']}")
+    else:
+        print("🚀 Early Stopping 비활성화 - 전체 에포크 훈련")
+
     # 4) Training Loop
     for epoch in range(1, CFG['EPOCHS']+1):
         model.train()
@@ -60,6 +72,17 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
         val_loss /= len(val_dataset)
 
         print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        
+        # Early Stopping 체크
+        if early_stopping:
+            if early_stopping(val_loss, model):
+                print(f"🏁 훈련 조기 종료 (Epoch {epoch}/{CFG['EPOCHS']})")
+                break
+
+    # 최종 결과 출력
+    if early_stopping:
+        best_score = early_stopping.get_best_score()
+        print(f"🏆 최고 성능: {CFG['EARLY_STOPPING']['MONITOR']} = {best_score:.6f}")
 
     return model
 

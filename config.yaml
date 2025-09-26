@@ -1,11 +1,25 @@
 # 기본 훈련 설정
 BATCH_SIZE: 4096
-EPOCHS: 10
+EPOCHS: 10  # Early stopping 테스트용
 LEARNING_RATE: 0.001
 SEED: 42
 
 # 검증 데이터 분할 비율
 VAL_SPLIT: 0.2
+
+# 데이터 샘플링 설정
+DATA:
+  USE_SAMPLING: true     # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
+  SAMPLE_SIZE: 10000     # 샘플 크기 (행 수) - 테스트용
+
+# Early Stopping 설정
+EARLY_STOPPING:
+  ENABLED: true          # Early stopping 사용 여부
+  PATIENCE: 3            # 개선이 없는 에포크 수 (patience) - 테스트용
+  MIN_DELTA: 0.001       # 개선으로 인정할 최소 변화량
+  MONITOR: "val_loss"    # 모니터링할 메트릭 (val_loss, val_accuracy 등)
+  MODE: "min"           # 모니터링 모드 (min: 감소, max: 증가)
+  RESTORE_BEST_WEIGHTS: true  # 최고 성능 가중치 복원 여부
 
 # 모델 설정
 MODEL:
@@ -16,8 +30,10 @@ MODEL:
 
 # 파일 경로 설정
 PATHS:
-  MODEL_SAVE: "trained_model.pth"
+  MODEL_SAVE: "trained_model_{datetime}.pth"
+  TEMP_MODEL: "temp_model_{datetime}.pth"  # 임시 웨이트 파일
   SUBMISSION: "baseline_submit.csv"
+  RESULTS_DIR: "results_{datetime}"  # 날짜별 결과 디렉토리
   TRAIN_DATA: "./train.parquet"
   TEST_DATA: "./test.parquet"
   SAMPLE_SUBMISSION: "./sample_submission.csv"

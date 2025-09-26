@@ -1,4 +1,4 @@
-from utils import seed_everything, load_config, print_config, print_valid_keys, get_device
+from utils import seed_everything, load_config, print_config, print_valid_keys, get_device, apply_datetime_to_paths
 
 # Default Configuration
 CFG = {
@@ -7,6 +7,18 @@ CFG = {
     'LEARNING_RATE': 1e-3,
     'SEED': 42,
     'VAL_SPLIT': 0.2,
+    'DATA': {
+        'USE_SAMPLING': True,
+        'SAMPLE_SIZE': 1000000
+    },
+    'EARLY_STOPPING': {
+        'ENABLED': True,
+        'PATIENCE': 5,
+        'MIN_DELTA': 0.001,
+        'MONITOR': 'val_loss',
+        'MODE': 'min',
+        'RESTORE_BEST_WEIGHTS': True
+    },
     'MODEL': {
         'TYPE': 'tabular_seq',
         'LSTM_HIDDEN': 64,
@@ -15,7 +27,9 @@ CFG = {
     },
     'PATHS': {
         'MODEL_SAVE': 'trained_model.pth',
+        'TEMP_MODEL': 'temp_model.pth',
         'SUBMISSION': 'baseline_submit.csv',
+        'RESULTS_DIR': 'results',
         'TRAIN_DATA': './train.parquet',
         'TEST_DATA': './test.parquet',
         'SAMPLE_SUBMISSION': './sample_submission.csv'
@@ -28,6 +42,8 @@ def load_project_config(config_path="config.yaml"):
     """프로젝트 설정을 로드하는 함수"""
     global CFG
     CFG = load_config(config_path, CFG)
+    # datetime 플레이스홀더를 실제 datetime으로 교체
+    CFG = apply_datetime_to_paths(CFG)
     return CFG
 
 def initialize(config_path="config.yaml"):
