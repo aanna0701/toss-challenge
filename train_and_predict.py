@@ -4,13 +4,11 @@
 """
 
 import os
-import shutil
 from datetime import datetime
-import pandas as pd
 import yaml
 
 # config_debug.yaml 로드
-with open('config_debug.yaml', 'r', encoding='utf-8') as f:
+with open('config.yaml', 'r', encoding='utf-8') as f:
     CFG = yaml.safe_load(f)
 
 from main import device
@@ -23,7 +21,9 @@ from predict import predict_test_data
 
 def create_results_directory():
     """결과 저장 디렉토리 생성"""
-    results_dir = CFG['PATHS']['RESULTS_DIR']
+    # {datetime}을 실제 타임스탬프로 치환
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
     os.makedirs(results_dir, exist_ok=True)
     print(f"📁 결과 디렉토리 생성: {results_dir}")
     return results_dir
@@ -112,7 +112,8 @@ def main():
     print_step_summary("디렉토리 생성", {"Results Dir": results_dir})
     
     # 3. 임시 웨이트 파일 경로 설정
-    temp_model_path = CFG['PATHS']['TEMP_MODEL']
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_model_path = CFG['PATHS']['TEMP_MODEL'].replace('{datetime}', timestamp)
     print(f"📝 임시 웨이트 파일 경로: {temp_model_path}")
     
     try:
@@ -224,7 +225,7 @@ def main():
         print(f"⏱️  총 소요 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
     except Exception as e:
-        print(f"\n❌ 오류 발생 (단계 {step if 'step' in locals() else 'Unknown'}): {e}")
+        print(f"\n❌ 오류 발생: {e}")
         import traceback
         print(f"🔍 상세 오류:")
         traceback.print_exc()

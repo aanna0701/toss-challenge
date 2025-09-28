@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # 설정
-STUDIO_NAME="confidential-blush-p5ch"
-TEAMSPACE="TOSS"
-SCRIPT_DIR="/teamspace/studios/this_studio/toss"
+STUDIO_NAME="fun-tan-2pfe"
+TEAMSPACE="TOSS-challenge"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"/toss
 
 echo "🚀 훈련 워크플로우 시작"
 echo "=================================="
