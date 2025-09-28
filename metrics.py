@@ -5,6 +5,7 @@
 - Score = 0.5*AP + 0.5*(1/1+WLL)
 """
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, log_loss
@@ -180,6 +181,9 @@ def save_training_logs(logs, filepath):
         logs: 훈련 로그 리스트 (각 요소는 딕셔너리)
         filepath: 저장할 파일 경로
     """
+    # 디렉토리가 존재하지 않으면 생성
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
     df = pd.DataFrame(logs)
     df.to_csv(filepath, index=False)
     print(f"📊 훈련 로그 저장: {filepath}")

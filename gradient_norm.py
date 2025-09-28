@@ -41,16 +41,20 @@ def calculate_gradient_norms(model, components: List[str]) -> Dict[str, float]:
                 lstm_params += 1
         gradient_norms['lstm'] = lstm_norm ** 0.5 if lstm_params > 0 else 0.0
     
-    # MLP 부분 gradient norm
-    if 'mlp' in components:
-        mlp_norm = 0.0
-        mlp_params = 0
+    # 모델 부분 gradient norm (MLP/Transformer 등)
+    if 'model' in components:
+        model_norm = 0.0
+        model_params = 0
         for name, param in model.named_parameters():
-            if 'mlp' in name.lower() or ('linear' in name.lower() and 'lstm' not in name.lower()) and param.grad is not None:
+            if ('mlp' in name.lower() or 
+                'transformer' in name.lower() or 
+                ('linear' in name.lower() and 'lstm' not in name.lower()) or
+                'attention' in name.lower() or
+                'feedforward' in name.lower()) and param.grad is not None:
                 param_norm = param.grad.data.norm(2)
-                mlp_norm += param_norm.item() ** 2
-                mlp_params += 1
-        gradient_norms['mlp'] = mlp_norm ** 0.5 if mlp_params > 0 else 0.0
+                model_norm += param_norm.item() ** 2
+                model_params += 1
+        gradient_norms['model'] = model_norm ** 0.5 if model_params > 0 else 0.0
     
     return gradient_norms
 

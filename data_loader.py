@@ -449,15 +449,8 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
     
     def safe_load_parquet(file_path, sample_size=None):
         """안전한 parquet 로드 함수"""
-        try:
-            # 전체 데이터 로드 시도
-            if not use_sampling:
-                return pd.read_parquet(file_path, engine="pyarrow")
-            else:
-                raise Exception("샘플링 모드로 진행")
-        except Exception:
-            print(f"⚠️  {file_path} 대용량 데이터 - 샘플링 진행...")
-            
+        if use_sampling:
+            print(f"📊 샘플링 모드 활성화 - {file_path}")
             try:
                 import pyarrow.parquet as pq
                 parquet_file = pq.ParquetFile(file_path)
@@ -479,9 +472,17 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
                     return pd.concat(chunks, ignore_index=True).head(sample_size)
                 else:
                     return pd.read_parquet(file_path, engine="pyarrow")
-                    
             except Exception as e:
-                print(f"❌ {file_path} 로드 실패: {e}")
+                print(f"⚠️  샘플링 중 오류 발생: {e}")
+                print("전체 데이터 로드로 대체...")
+                return pd.read_parquet(file_path, engine="pyarrow")
+        else:
+            print(f"📊 전체 데이터 로드 모드 - {file_path}")
+            try:
+                return pd.read_parquet(file_path, engine="pyarrow")
+            except Exception as e:
+                print(f"⚠️  전체 데이터 로드 실패: {e}")
+                print("메모리 부족으로 인한 오류일 수 있습니다. 샘플링을 권장합니다.")
                 raise
     
     # 데이터 로드

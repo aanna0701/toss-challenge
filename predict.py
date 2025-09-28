@@ -122,7 +122,7 @@ def load_trained_model(feature_cols, model_path=None, device="cuda", model_type=
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, weights_only=True))
     print(f"Model loaded from {model_path}")
     return model
 

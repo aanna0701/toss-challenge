@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -191,7 +192,12 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
 
     # 훈련 로그 저장
     if CFG['METRICS']['SAVE_LOGS']:
-        log_filepath = CFG['PATHS']['RESULTS_DIR'] + "/" + CFG['METRICS']['LOG_FILE']
+        # RESULTS_DIR에서 {datetime}을 실제 타임스탬프로 치환
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
+        os.makedirs(results_dir, exist_ok=True)
+        log_filepath = results_dir + "/" + CFG['METRICS']['LOG_FILE']
         save_training_logs(training_logs, log_filepath)
         
         # 최고 성능 정보 출력
@@ -205,7 +211,8 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
 
     # Gradient norm 로그 저장 및 분석
     if gradient_norm_enabled and CFG['GRADIENT_NORM']['SAVE_LOGS'] and gradient_norm_logs:
-        gradient_log_filepath = CFG['PATHS']['RESULTS_DIR'] + "/" + CFG['GRADIENT_NORM']['LOG_FILE']
+        # RESULTS_DIR에서 {datetime}을 실제 타임스탬프로 치환 (이미 위에서 생성됨)
+        gradient_log_filepath = results_dir + "/" + CFG['GRADIENT_NORM']['LOG_FILE']
         save_gradient_norm_logs(gradient_norm_logs, gradient_log_filepath)
         
         # Gradient 행동 분석
@@ -221,7 +228,7 @@ def save_model(model, path="model.pth"):
 
 def load_model(model, path="model.pth"):
     """모델 로드 함수"""
-    model.load_state_dict(torch.load(path))
+    model.load_state_dict(torch.load(path, weights_only=True))
     print(f"Model loaded from {path}")
     return model
 

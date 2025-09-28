@@ -33,7 +33,7 @@ GRADIENT_NORM:
   LOG_FILE: "gradient_norms.csv"  # Gradient norm 로그 파일명
   COMPONENTS:            # 측정할 모델 구성 요소들
     - "lstm"            # LSTM 부분
-    - "mlp"             # MLP 부분
+    - "model"           # 모델 부분 (MLP/Transformer 등)
     - "total"           # 전체 모델
 
 # 모델 설정
