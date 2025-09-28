@@ -119,6 +119,8 @@ def main():
     try:
         # 4. 데이터 로드 및 전처리
         print_progress(3, total_steps, "데이터 로드 및 전처리")
+        # 훈련 데이터: config.yaml의 USE_SAMPLING 설정에 따라 샘플링 또는 전체 로드
+        # 테스트 데이터: 무조건 전체 데이터 로드 (force_full_load=True)
         train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data()
         print_step_summary("데이터 로드", {
             "Train Shape": train_data.shape,
@@ -126,7 +128,9 @@ def main():
             "Features": len(feature_cols),
             "Sequence Column": seq_col,
             "Target Column": target_col,
-            "Test ID Column": "ID" in test_data.columns
+            "Test ID Column": "ID" in test_data.columns,
+            "Data Sampling": CFG['DATA']['USE_SAMPLING'],
+            "Test Data": "전체 로드 (샘플링 없음)"
         })
         
         # 5. 모델 훈련

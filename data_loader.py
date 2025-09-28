@@ -447,9 +447,18 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
     if sample_size is None:
         sample_size = CFG['DATA']['SAMPLE_SIZE']
     
-    def safe_load_parquet(file_path, sample_size=None):
+    def safe_load_parquet(file_path, sample_size=None, force_full_load=False):
         """안전한 parquet 로드 함수"""
-        if use_sampling:
+        # force_full_load가 True이거나 use_sampling이 False이면 전체 데이터 로드
+        if force_full_load or not use_sampling:
+            print(f"📊 전체 데이터 로드 모드 - {file_path}")
+            try:
+                return pd.read_parquet(file_path, engine="pyarrow")
+            except Exception as e:
+                print(f"⚠️  전체 데이터 로드 실패: {e}")
+                print("메모리 부족으로 인한 오류일 수 있습니다. 샘플링을 권장합니다.")
+                raise
+        else:
             print(f"📊 샘플링 모드 활성화 - {file_path}")
             try:
                 import pyarrow.parquet as pq
@@ -476,21 +485,14 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
                 print(f"⚠️  샘플링 중 오류 발생: {e}")
                 print("전체 데이터 로드로 대체...")
                 return pd.read_parquet(file_path, engine="pyarrow")
-        else:
-            print(f"📊 전체 데이터 로드 모드 - {file_path}")
-            try:
-                return pd.read_parquet(file_path, engine="pyarrow")
-            except Exception as e:
-                print(f"⚠️  전체 데이터 로드 실패: {e}")
-                print("메모리 부족으로 인한 오류일 수 있습니다. 샘플링을 권장합니다.")
-                raise
     
     # 데이터 로드
     print("📊 훈련 데이터 로드 중...")
     all_train = safe_load_parquet(CFG['PATHS']['TRAIN_DATA'], sample_size)
     
     print("📊 테스트 데이터 로드 중...")
-    test = safe_load_parquet(CFG['PATHS']['TEST_DATA'], sample_size)
+    # 테스트 데이터는 무조건 전체 로드
+    test = safe_load_parquet(CFG['PATHS']['TEST_DATA'], sample_size, force_full_load=True)
     # 테스트 데이터에는 ID 컬럼이 반드시 있어야 함 (예측 시 필요)
     if 'ID' not in test.columns:
         raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 예측을 위해서는 ID가 필요합니다.")
