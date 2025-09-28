@@ -39,28 +39,62 @@ class ClickDataset(Dataset):
 
         seq = torch.from_numpy(arr)  # shape (seq_len,)
 
+        # ID는 항상 반환 (train/val/test 구분 없이)
+        id_val = self.df.iloc[idx]['ID']
+        
+        # 딕셔너리 형태로 반환
+        item = {
+            'x': x,
+            'seq': seq,
+            'id': id_val
+        }
+        
         if self.has_target:
             y = torch.tensor(self.y[idx], dtype=torch.float)
-            return x, seq, y
-        else:
-            return x, seq
+            item['y'] = y
+        
+        return item
 
 def collate_fn_train(batch):
-    xs, seqs, ys = zip(*batch)
+    # 딕셔너리 배치에서 값들 추출
+    xs = [item['x'] for item in batch]
+    seqs = [item['seq'] for item in batch]
+    ids = [item['id'] for item in batch]
+    ys = [item['y'] for item in batch]  # has_target=True인 경우만
+    
     xs = torch.stack(xs)
     ys = torch.stack(ys)
     seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
     seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
     seq_lengths = torch.clamp(seq_lengths, min=1)  # 빈 시퀀스 방지
-    return xs, seqs_padded, seq_lengths, ys
+    
+    # 딕셔너리 형태로 배치 반환
+    return {
+        'xs': xs,
+        'seqs': seqs_padded,
+        'seq_lengths': seq_lengths,
+        'ys': ys,
+        'ids': ids
+    }
 
 def collate_fn_infer(batch):
-    xs, seqs = zip(*batch)
+    # 딕셔너리 배치에서 값들 추출
+    xs = [item['x'] for item in batch]
+    seqs = [item['seq'] for item in batch]
+    ids = [item['id'] for item in batch]
+    
     xs = torch.stack(xs)
     seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
     seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
     seq_lengths = torch.clamp(seq_lengths, min=1)
-    return xs, seqs_padded, seq_lengths
+    
+    # 딕셔너리 형태로 배치 반환
+    return {
+        'xs': xs,
+        'seqs': seqs_padded,
+        'seq_lengths': seq_lengths,
+        'ids': ids
+    }
 
 def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target_col, batch_size):
     """데이터로더 생성 함수"""
@@ -156,8 +190,11 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
     
     print("📊 테스트 데이터 로드 중...")
     test = safe_load_parquet(CFG['PATHS']['TEST_DATA'], sample_size)
-    if 'ID' in test.columns:
-        test = test.drop(columns=['ID'])
+    # ID 컬럼이 있는지 확인만 하고 그대로 유지
+    if 'ID' not in test.columns:
+        raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 데이터 파일을 확인해주세요.")
+    
+    print(f"✅ 테스트 데이터 로드 완료: {test.shape[0]}개 행, ID 컬럼 포함")
 
     print("Train shape:", all_train.shape)
     print("Test shape:", test.shape)

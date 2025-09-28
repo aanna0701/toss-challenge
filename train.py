@@ -73,8 +73,14 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
         train_loss = 0.0
         epoch_gradient_norms = []
         
-        for batch_idx, (xs, seqs, seq_lens, ys) in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch}")):
-            xs, seqs, seq_lens, ys = xs.to(device), seqs.to(device), seq_lens.to(device), ys.to(device)
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch}")):
+            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
+            xs = batch.get('xs').to(device)
+            seqs = batch.get('seqs').to(device)
+            seq_lens = batch.get('seq_lengths').to(device)
+            ys = batch.get('ys').to(device)
+            batch_ids = batch.get('ids', [])  # ID 정보 (필요시 사용)
+            
             optimizer.zero_grad()
             logits = model(xs, seqs, seq_lens)
             loss = criterion(logits, ys)

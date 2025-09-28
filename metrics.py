@@ -114,8 +114,13 @@ def evaluate_model(model, data_loader, device="cuda"):
     criterion = torch.nn.BCEWithLogitsLoss()
     
     with torch.no_grad():
-        for xs, seqs, seq_lens, ys in data_loader:
-            xs, seqs, seq_lens, ys = xs.to(device), seqs.to(device), seq_lens.to(device), ys.to(device)
+        for batch in data_loader:
+            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
+            xs = batch.get('xs').to(device)
+            seqs = batch.get('seqs').to(device)
+            seq_lens = batch.get('seq_lengths').to(device)
+            ys = batch.get('ys').to(device)
+            batch_ids = batch.get('ids', [])  # ID 정보 (필요시 사용)
             
             # 예측
             logits = model(xs, seqs, seq_lens)

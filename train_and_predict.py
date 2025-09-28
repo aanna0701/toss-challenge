@@ -116,7 +116,8 @@ def main():
             "Test Shape": test_data.shape,
             "Features": len(feature_cols),
             "Sequence Column": seq_col,
-            "Target Column": target_col
+            "Target Column": target_col,
+            "Test ID Column": "ID" in test_data.columns
         })
         
         # 5. 모델 훈련

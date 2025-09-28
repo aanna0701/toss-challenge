@@ -9,30 +9,60 @@ from model import *
 
 
 def predict(model, test_loader, device="cuda"):
-    """예측 함수"""
+    """예측 함수 - 딕셔너리 배치에서 ID와 예측값을 함께 반환"""
     model.eval()
     predictions = []
+    ids = []
     
     with torch.no_grad():
-        for xs, seqs, lens in tqdm(test_loader, desc="Inference"):
-            xs, seqs, lens = xs.to(device), seqs.to(device), lens.to(device)
-            logits = model(xs, seqs, lens)
+        for batch in tqdm(test_loader, desc="Inference"):
+            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
+            xs = batch.get('xs').to(device)
+            seqs = batch.get('seqs').to(device)
+            seq_lengths = batch.get('seq_lengths').to(device)
+            batch_ids = batch.get('ids', [])  # 키가 없으면 빈 리스트 반환
+            
+            if not batch_ids:
+                raise ValueError("❌ 배치에서 'ids' 키를 찾을 수 없습니다!")
+            
+            ids.extend(batch_ids)
+            
+            logits = model(xs, seqs, seq_lengths)
             probs = torch.sigmoid(logits)
             predictions.append(probs.cpu())
     
-    return torch.cat(predictions).numpy()
+    predictions_array = torch.cat(predictions).numpy()
+    
+    # ID와 예측값을 딕셔너리 형태로 반환
+    result = {
+        'ids': ids,
+        'predictions': predictions_array
+    }
+    
+    return result
 
-def create_submission(predictions, output_path=None):
-    """제출 파일 생성 함수"""
+def create_submission(prediction_result, output_path=None):
+    """제출 파일 생성 함수 - 딕셔너리 형태의 예측 결과를 받음"""
     if output_path is None:
         output_path = CFG['PATHS']['SUBMISSION']
     
-    # 예측 결과 길이에 맞는 제출 파일 생성
+    # 예측 결과에서 ID와 predictions 추출
+    ids = prediction_result['ids']
+    predictions = prediction_result['predictions']
+    
+    # 검증
+    if not ids:
+        raise ValueError("❌ ID 정보가 없습니다!")
+    
+    if len(ids) != len(predictions):
+        raise ValueError(f"❌ ID 개수({len(ids)})와 예측 결과 개수({len(predictions)})가 일치하지 않습니다!")
+    
     submit = pd.DataFrame({
-        'ID': range(len(predictions)),
+        'ID': ids,
         'clicked': predictions
     })
     
+    print("✅ ID와 예측값 매칭 완료")
     submit.to_csv(output_path, index=False)
     print(f"Submission file saved to {output_path}")
     print(f"Submission shape: {submit.shape}")
@@ -57,14 +87,14 @@ def load_trained_model(feature_cols, model_path=None, device="cuda"):
 
 def run_inference(model, test_data, feature_cols, seq_col, batch_size, device="cuda"):
     """추론 실행 함수"""
-    # Test dataset 생성
+    # Test dataset 생성 (ID 정보는 데이터프레임에 포함되어 있음)
     test_dataset = ClickDataset(test_data, feature_cols, seq_col, has_target=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
     
     # 예측 수행
-    predictions = predict(model, test_loader, device)
+    prediction_result = predict(model, test_loader, device)
     
-    return predictions
+    return prediction_result
 
 if __name__ == "__main__":
     # 초기화
@@ -81,7 +111,7 @@ if __name__ == "__main__":
         exit(1)
     
     # 추론 실행
-    predictions = run_inference(
+    prediction_result = run_inference(
         model=model,
         test_data=test_data,
         feature_cols=feature_cols,
@@ -91,41 +121,32 @@ if __name__ == "__main__":
     )
     
     # 제출 파일 생성
-    submission = create_submission(predictions)
+    submission = create_submission(prediction_result)
+    predictions = prediction_result['predictions']
     print("Prediction completed!")
     print(f"Prediction shape: {predictions.shape}")
     print(f"Prediction stats: min={predictions.min():.4f}, max={predictions.max():.4f}, mean={predictions.mean():.4f}")
 
 
 def predict_test_data(test_data, feature_cols, seq_col, model_path=None, device="cuda"):
-    """테스트 데이터에 대한 예측을 수행하고 제출 파일을 반환하는 함수"""
-    from main import CFG
-    from data_loader import create_data_loaders
     
     # 모델 로드
     model = load_trained_model(feature_cols, model_path, device)
     
-    # 테스트 데이터로더 생성
-    _, _, test_loader, _, _ = create_data_loaders(
-        train_df=None,  # 사용하지 않음
-        val_df=None,    # 사용하지 않음
-        test_df=test_data,
+    # 예측 수행
+    prediction_result = run_inference(
+        model=model,
+        test_data=test_data,
         feature_cols=feature_cols,
         seq_col=seq_col,
-        target_col=None,  # 테스트에는 타겟 없음
-        batch_size=CFG['BATCH_SIZE']
-    )
-    
-    # 예측 수행
-    predictions = predict(
-        model=model,
-        test_loader=test_loader,
+        batch_size=CFG['BATCH_SIZE'],
         device=device
     )
     
     # 제출 파일 생성
-    submission = create_submission(predictions)
+    submission = create_submission(prediction_result)
     
+    predictions = prediction_result['predictions']
     print(f"✅ 예측 완료!")
     print(f"📊 예측 결과 통계:")
     print(f"   - Shape: {predictions.shape}")
