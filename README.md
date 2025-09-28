@@ -17,14 +17,24 @@
 ├── main.py                    # 메인 설정 및 초기화
 ├── utils.py                   # 유틸리티 함수들
 ├── config.yaml               # 설정 파일 (TabularSeq + Transformer)
-├── data_loader.py            # 데이터 로더 (모델별 분기)
+├── data_loader.py            # 데이터 로더 (모델별 분기 + 전처리된 데이터)
 ├── model.py                  # 모델 정의 (TabularSeq + Transformer)
-├── train.py                  # 모델 훈련 (모델별 분기)
+├── train.py                  # 모델 훈련 (모델별 분기 + 전처리된 데이터)
 ├── predict.py                # 예측 및 제출 (모델별 분기)
 ├── train_and_predict.py      # 🆕 원클릭 훈련+예측 워크플로우
+├── preprocess_train_data.py  # 🆕 훈련 데이터 전처리 및 텐서 저장
 ├── metrics.py                # 평가 메트릭 (AP, WLL, Score)
 ├── early_stopping.py         # 조기 종료 기능
 ├── gradient_norm.py          # 그래디언트 모니터링
+├── data/                     # 🆕 전처리된 데이터 (자동 생성)
+│   ├── x_categorical.pt      # 범주형 피처 텐서
+│   ├── x_numerical.pt        # 수치형 피처 텐서
+│   ├── sequences.pt          # 시퀀스 피처 텐서
+│   ├── nan_mask.pt           # NaN 마스크 텐서
+│   ├── targets.pt            # 타겟 텐서
+│   ├── ids.pt                # ID 텐서
+│   ├── feature_processor.pt  # 전처리 파이프라인
+│   └── metadata.json         # 메타데이터
 ├── analysis/                 # 데이터 분석
 │   ├── chunk_eda.py         # 청크 단위 EDA (전체 데이터)
 │   ├── chunk_utils.py       # 청크 분석 유틸리티
@@ -69,16 +79,9 @@ pip install -r requirements.txt
 
 ## 🚀 사용 방법
 
-### 1. 원클릭 실행 (추천)
+### 1. 데이터 전처리 (필수)
 
-```bash
-# 훈련 → 예측 → 결과 저장을 한 번에 실행
-python train_and_predict.py
-```
-
-### 2. 단계별 실행
-
-#### 데이터 분석
+#### 전체 데이터 분석 및 통계 계산
 ```bash
 # 전체 데이터 청크 분석
 python analysis/chunk_eda.py
@@ -90,14 +93,42 @@ python analysis/feature_quality_analysis.py
 python analysis/compute_normalization_stats.py
 ```
 
-#### 모델 훈련
+#### 훈련 데이터 전처리 및 텐서 저장
 ```bash
-# 기본 설정으로 훈련
+# train.parquet를 전처리하고 텐서로 저장
+python preprocess_train_data.py
+```
+
+이 스크립트는 다음 작업을 수행합니다:
+- `train.parquet` 파일 로드
+- ID를 0부터 시작하도록 재할당
+- FeatureProcessor로 피처 전처리
+- 텐서 형태로 `data/` 폴더에 저장
+
+### 2. 모델 훈련 및 예측
+
+#### 원클릭 실행 (추천)
+```bash
+# 전처리된 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
+python train_and_predict.py
+```
+
+#### 단계별 실행
+```bash
+# 전처리된 데이터로 훈련
 python train.py
 
 # 예측 및 제출 파일 생성
 python predict.py
 ```
+
+### 3. 전처리된 데이터 사용
+
+전처리된 데이터를 사용하면 다음과 같은 장점이 있습니다:
+- ✅ **빠른 로딩**: 텐서로 미리 변환되어 로딩 속도 향상
+- ✅ **메모리 효율성**: 필요한 데이터만 로드
+- ✅ **일관성**: 동일한 전처리 파이프라인 보장
+- ✅ **재사용성**: 여러 실험에서 동일한 전처리된 데이터 사용
 
 ### 3. 모델 선택
 
@@ -144,17 +175,32 @@ MODEL:
 
 ## 📊 데이터 처리
 
-### 피처 분류 (자동)
-- **범주형**: `gender`, `age_group`, `inventory_id`, `day_of_week`, `hour`
-- **수치형**: 나머지 모든 피처 (제외: 범주형, 시퀀스, ID, target)
-- **시퀀스**: `seq` (문자열 파싱)
-- **제외**: `l_feat_20`, `l_feat_23` (상수 피처)
+### 1. 데이터 분석 단계
+- **전체 데이터 EDA**: `analysis/chunk_eda.py`로 대용량 데이터 분석
+- **피처 품질 분석**: `analysis/feature_quality_analysis.py`로 피처 특성 파악
+- **정규화 통계 계산**: `analysis/compute_normalization_stats.py`로 표준화 통계 생성
 
-### 전처리 파이프라인
-1. **범주형**: 고유값 정렬 → 0부터 연속 정수 매핑
-2. **수치형**: Z-score 표준화 (미리 계산된 통계 사용)
-3. **시퀀스**: 문자열 파싱 → 패딩 → LSTM 처리
-4. **누락값**: NaN 마스크 생성 → NaN 토큰으로 대체
+### 2. 데이터 전처리 단계
+- **피처 분류 (자동)**: 
+  - **범주형**: `gender`, `age_group`, `inventory_id`, `day_of_week`, `hour`
+  - **수치형**: 나머지 모든 피처 (제외: 범주형, 시퀀스, ID, target)
+  - **시퀀스**: `seq` (문자열 파싱)
+  - **제외**: `l_feat_20`, `l_feat_23` (상수 피처)
+
+- **전처리 파이프라인**:
+  1. **범주형**: 고유값 정렬 → 0부터 연속 정수 매핑
+  2. **수치형**: Z-score 표준화 (미리 계산된 통계 사용)
+  3. **시퀀스**: 문자열 파싱 → 패딩 → LSTM 처리
+  4. **누락값**: NaN 마스크 생성 → NaN 토큰으로 대체
+
+### 3. 텐서 저장
+- **범주형 피처**: `x_categorical.pt` (LongTensor)
+- **수치형 피처**: `x_numerical.pt` (FloatTensor)
+- **시퀀스 피처**: `sequences.pt` (List[Tensor])
+- **NaN 마스크**: `nan_mask.pt` (FloatTensor)
+- **타겟**: `targets.pt` (FloatTensor)
+- **ID**: `ids.pt` (LongTensor)
+- **전처리 파이프라인**: `feature_processor.pt` (재사용용)
 
 ## 📈 평가 메트릭
 
@@ -163,6 +209,16 @@ MODEL:
 - **Score**: `0.5 * AP + 0.5 * (1 / (1 + WLL))`
 
 ## 📁 출력 파일
+
+### 전처리된 데이터 (`data/`)
+- `x_categorical.pt`: 범주형 피처 텐서
+- `x_numerical.pt`: 수치형 피처 텐서
+- `sequences.pt`: 시퀀스 피처 텐서
+- `nan_mask.pt`: NaN 마스크 텐서
+- `targets.pt`: 타겟 텐서
+- `ids.pt`: ID 텐서
+- `feature_processor.pt`: 전처리 파이프라인
+- `metadata.json`: 메타데이터
 
 ### 훈련 결과
 - `trained_model_{datetime}.pth`: 훈련된 모델

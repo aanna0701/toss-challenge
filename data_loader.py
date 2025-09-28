@@ -5,18 +5,24 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import json
 import yaml
+import os
 from typing import Dict, List, Tuple, Optional, Union
 
 class FeatureProcessor:
     """피처 전처리 클래스"""
     
     def __init__(self, config_path: str = "config.yaml", normalization_stats_path: str = "analysis/results/normalization_stats.json"):
+        # 현재 스크립트의 디렉토리 기준으로 상대경로 설정
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
         # Config 로드
-        with open(config_path, 'r', encoding='utf-8') as f:
+        config_full_path = os.path.join(script_dir, config_path)
+        with open(config_full_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
         
         # Normalization stats 로드
-        with open(normalization_stats_path, 'r', encoding='utf-8') as f:
+        norm_stats_full_path = os.path.join(script_dir, normalization_stats_path)
+        with open(norm_stats_full_path, 'r', encoding='utf-8') as f:
             self.norm_stats = json.load(f)['statistics']
         
         # 피처 분류
@@ -57,28 +63,30 @@ class FeatureProcessor:
                 encoded = df[feat].map(self.categorical_encoders[feat]).fillna(0).astype(int)
                 categorical_data.append(encoded.values)
             else:
-                # 피처가 없으면 0으로 채움
-                categorical_data.append(np.zeros(batch_size, dtype=int))
+                raise ValueError(f"❌ 범주형 피처 '{feat}'가 데이터에 없습니다!")
         
         if categorical_data:
             x_categorical = torch.tensor(np.column_stack(categorical_data), dtype=torch.long)
         else:
             x_categorical = torch.empty(batch_size, 0, dtype=torch.long)
         
-        # 수치형 피처 처리 (표준화)
+        # 수치형 피처 처리 (표준화) - 무조건 적용
         numerical_data = []
         for feat in self.numerical_features:
-            if feat in df.columns and feat in self.norm_stats:
-                # 표준화: (x - mean) / std
-                mean = self.norm_stats[feat]['mean']
-                std = self.norm_stats[feat]['std']
-                # 데이터를 float로 변환 후 표준화
-                feat_data = pd.to_numeric(df[feat], errors='coerce').fillna(0)
-                standardized = (feat_data - mean) / std
-                numerical_data.append(standardized.values.astype(np.float32))
+            if feat in df.columns:
+                if feat in self.norm_stats:
+                    # 표준화: (x - mean) / std
+                    mean = self.norm_stats[feat]['mean']
+                    std = self.norm_stats[feat]['std']
+                    # 데이터를 float로 변환 후 표준화
+                    feat_data = pd.to_numeric(df[feat], errors='coerce').fillna(0)
+                    standardized = (feat_data - mean) / std
+                    numerical_data.append(standardized.values.astype(np.float32))
+                else:
+                    # norm_stats에 없는 경우 에러 발생
+                    raise ValueError(f"❌ {feat} 피처의 normalization stats가 없습니다! config.yaml과 normalization_stats.json을 확인해주세요.")
             else:
-                # 통계가 없으면 0으로 채움
-                numerical_data.append(np.zeros(batch_size, dtype=np.float32))
+                raise ValueError(f"❌ {feat} 피처가 데이터에 없습니다!")
         
         if numerical_data:
             x_numerical = torch.tensor(np.column_stack(numerical_data), dtype=torch.float32)
@@ -101,7 +109,7 @@ class FeatureProcessor:
                     arr = np.array([0.0], dtype=np.float32)
                 sequences.append(torch.from_numpy(arr))
         else:
-            sequences = [torch.tensor([0.0], dtype=torch.float32) for _ in range(batch_size)]
+            raise ValueError(f"❌ 시퀀스 피처 '{self.sequential_feature}'가 데이터에 없습니다!")
         
         # NaN 마스크 생성 (범주형 + 수치형 + 시퀀스 순서)
         nan_mask = []
@@ -170,60 +178,6 @@ class ClickDataset(Dataset):
         return item
 
 
-class TabularSeqDataset(Dataset):
-    """기존 TabularSeq 모델용 데이터셋 (하위 호환성)"""
-    def __init__(self, df, feature_cols, seq_col, target_col=None, has_target=True, has_id=False):
-        self.df = df.reset_index(drop=True)
-        self.feature_cols = feature_cols
-        self.seq_col = seq_col
-        self.target_col = target_col
-        self.has_target = has_target
-        self.has_id = has_id
-
-        # 비-시퀀스 피처: 전부 연속값으로
-        self.X = self.df[self.feature_cols].astype(float).fillna(0).values
-
-        # 시퀀스: 문자열 그대로 보관 (lazy 파싱)
-        self.seq_strings = self.df[self.seq_col].astype(str).values
-
-        if self.has_target:
-            self.y = self.df[self.target_col].astype(np.float32).values
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        x = torch.tensor(self.X[idx], dtype=torch.float)
-
-        # 전체 시퀀스 사용 (빈 시퀀스만 방어)
-        s = self.seq_strings[idx]
-        if s:
-            arr = np.fromstring(s, sep=",", dtype=np.float32)
-        else:
-            arr = np.array([], dtype=np.float32)
-
-        if arr.size == 0:
-            arr = np.array([0.0], dtype=np.float32)  # 빈 시퀀스 방어
-
-        seq = torch.from_numpy(arr)  # shape (seq_len,)
-
-        # 딕셔너리 형태로 반환
-        item = {
-            'x': x,
-            'seq': seq
-        }
-        
-        # ID가 필요한 경우에만 처리
-        if self.has_id:
-            if 'ID' not in self.df.columns:
-                raise ValueError("❌ ID가 필요한데 데이터에 'ID' 컬럼이 없습니다!")
-            item['id'] = self.df.iloc[idx]['ID']
-        
-        if self.has_target:
-            y = torch.tensor(self.y[idx], dtype=torch.float)
-            item['y'] = y
-        
-        return item
 
 def collate_fn_transformer_train(batch):
     """Transformer 모델용 훈련 collate 함수"""
@@ -295,147 +249,57 @@ def collate_fn_transformer_infer(batch):
     
     return result
 
-def collate_fn_seq_train(batch):
-    """TabularSeq 모델용 훈련 collate 함수 (하위 호환성)"""
-    # 딕셔너리 배치에서 값들 추출
-    xs = [item['x'] for item in batch]
-    seqs = [item['seq'] for item in batch]
-    ys = [item['y'] for item in batch]  # has_target=True인 경우만
-    
-    xs = torch.stack(xs)
-    ys = torch.stack(ys)
-    seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
-    seq_lengths = torch.clamp(seq_lengths, min=1)  # 빈 시퀀스 방지
-    
-    # 딕셔너리 형태로 배치 반환 (훈련 시에는 ID가 없음)
-    return {
-        'xs': xs,
-        'seqs': seqs_padded,
-        'seq_lengths': seq_lengths,
-        'ys': ys
-    }
 
-def collate_fn_seq_infer(batch):
-    """TabularSeq 모델용 추론 collate 함수 (하위 호환성)"""
-    # 딕셔너리 배치에서 값들 추출
-    xs = [item['x'] for item in batch]
-    seqs = [item['seq'] for item in batch]
-    
-    # 예측 시에는 ID가 반드시 필요
-    if 'id' not in batch[0]:
-        raise ValueError("❌ 예측 시에는 ID가 반드시 필요합니다! 테스트 데이터에 'ID' 컬럼이 있는지 확인해주세요.")
-    
-    ids = [item['id'] for item in batch]
-    
-    # ID에 None이 포함되어 있는지 확인
-    if any(id_val is None for id_val in ids):
-        raise ValueError("❌ ID 값에 None이 포함되어 있습니다! 테스트 데이터의 'ID' 컬럼을 확인해주세요.")
-    
-    xs = torch.stack(xs)
-    seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
-    seq_lengths = torch.clamp(seq_lengths, min=1)
-    
-    # 딕셔너리 형태로 배치 반환
-    result = {
-        'xs': xs,
-        'seqs': seqs_padded,
-        'seq_lengths': seq_lengths,
-        'ids': ids
-    }
-    
-    return result
-
-def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target_col, batch_size, model_type="tabular_transformer"):
+def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target_col, batch_size):
     """데이터로더 생성 함수"""
     import pandas as pd
     
-    if model_type == "tabular_transformer":
-        # Transformer 모델용 데이터 로더
-        # FeatureProcessor 생성 및 학습
-        feature_processor = FeatureProcessor()
-        if train_df is not None and len(train_df) > 0:
-            feature_processor.fit(train_df)
-        else:
-            # 더미 데이터로 학습
-            dummy_data = {col: [0.0] for col in feature_cols}
-            dummy_data[seq_col] = ["0.0"]
-            dummy_data[target_col] = [0.0]
-            dummy_train_df = pd.DataFrame(dummy_data)
-            feature_processor.fit(dummy_train_df)
-        
-        # Train dataset
-        if train_df is not None and len(train_df) > 0:
-            train_dataset = ClickDataset(train_df, feature_processor, target_col, has_target=True, has_id=False)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_transformer_train)
-        else:
-            dummy_data = {col: [0.0] for col in feature_cols}
-            dummy_data[seq_col] = ["0.0"]
-            dummy_data[target_col] = [0.0]
-            dummy_train_df = pd.DataFrame(dummy_data)
-            train_dataset = ClickDataset(dummy_train_df, feature_processor, target_col, has_target=True, has_id=False)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_transformer_train)
-        
-        # Val dataset
-        if val_df is not None and len(val_df) > 0:
-            val_dataset = ClickDataset(val_df, feature_processor, target_col, has_target=True, has_id=False)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_train)
-        else:
-            dummy_data = {col: [0.0] for col in feature_cols}
-            dummy_data[seq_col] = ["0.0"]
-            dummy_data[target_col] = [0.0]
-            dummy_val_df = pd.DataFrame(dummy_data)
-            val_dataset = ClickDataset(dummy_val_df, feature_processor, target_col, has_target=True, has_id=False)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_train)
-        
-        # Test dataset
-        if test_df is not None:
-            test_dataset = ClickDataset(test_df, feature_processor, has_target=False, has_id=True)
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
-        else:
-            dummy_test_df = pd.DataFrame(columns=feature_cols + [seq_col])
-            test_dataset = ClickDataset(dummy_test_df, feature_processor, has_target=False, has_id=False)
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
-        
-        return train_loader, val_loader, test_loader, train_dataset, val_dataset, feature_processor
-    
+    # FeatureProcessor 생성 및 학습
+    feature_processor = FeatureProcessor()
+    if train_df is not None and len(train_df) > 0:
+        feature_processor.fit(train_df)
     else:
-        # TabularSeq 모델용 데이터 로더 (하위 호환성)
-        # Train dataset
-        if train_df is not None and len(train_df) > 0:
-            train_dataset = TabularSeqDataset(train_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_seq_train)
-        else:
-            dummy_data = {col: [0.0] for col in feature_cols}
-            dummy_data[seq_col] = ["0.0"]
-            dummy_data[target_col] = [0.0]
-            dummy_train_df = pd.DataFrame(dummy_data)
-            train_dataset = TabularSeqDataset(dummy_train_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_seq_train)
-        
-        # Val dataset
-        if val_df is not None and len(val_df) > 0:
-            val_dataset = TabularSeqDataset(val_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_seq_train)
-        else:
-            dummy_data = {col: [0.0] for col in feature_cols}
-            dummy_data[seq_col] = ["0.0"]
-            dummy_data[target_col] = [0.0]
-            dummy_val_df = pd.DataFrame(dummy_data)
-            val_dataset = TabularSeqDataset(dummy_val_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_seq_train)
-        
-        # Test dataset
-        if test_df is not None:
-            test_dataset = TabularSeqDataset(test_df, feature_cols, seq_col, has_target=False, has_id=True)
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_seq_infer)
-        else:
-            dummy_test_df = pd.DataFrame(columns=feature_cols + [seq_col])
-            test_dataset = TabularSeqDataset(dummy_test_df, feature_cols, seq_col, has_target=False, has_id=False)
-            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_seq_infer)
-        
-        return train_loader, val_loader, test_loader, train_dataset, val_dataset
+        # 더미 데이터로 학습
+        dummy_data = {col: [0.0] for col in feature_cols}
+        dummy_data[seq_col] = ["0.0"]
+        dummy_data[target_col] = [0.0]
+        dummy_train_df = pd.DataFrame(dummy_data)
+        feature_processor.fit(dummy_train_df)
+    
+    # Train dataset
+    if train_df is not None and len(train_df) > 0:
+        train_dataset = ClickDataset(train_df, feature_processor, target_col, has_target=True, has_id=False)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_transformer_train)
+    else:
+        dummy_data = {col: [0.0] for col in feature_cols}
+        dummy_data[seq_col] = ["0.0"]
+        dummy_data[target_col] = [0.0]
+        dummy_train_df = pd.DataFrame(dummy_data)
+        train_dataset = ClickDataset(dummy_train_df, feature_processor, target_col, has_target=True, has_id=False)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_transformer_train)
+    
+    # Val dataset
+    if val_df is not None and len(val_df) > 0:
+        val_dataset = ClickDataset(val_df, feature_processor, target_col, has_target=True, has_id=False)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_train)
+    else:
+        dummy_data = {col: [0.0] for col in feature_cols}
+        dummy_data[seq_col] = ["0.0"]
+        dummy_data[target_col] = [0.0]
+        dummy_val_df = pd.DataFrame(dummy_data)
+        val_dataset = ClickDataset(dummy_val_df, feature_processor, target_col, has_target=True, has_id=False)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_train)
+    
+    # Test dataset
+    if test_df is not None:
+        test_dataset = ClickDataset(test_df, feature_processor, has_target=False, has_id=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
+    else:
+        dummy_test_df = pd.DataFrame(columns=feature_cols + [seq_col])
+        test_dataset = ClickDataset(dummy_test_df, feature_processor, has_target=False, has_id=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
+    
+    return train_loader, val_loader, test_loader, train_dataset, val_dataset, feature_processor
 
 def load_and_preprocess_data():
     """데이터 로드 및 전처리 함수"""
@@ -465,18 +329,34 @@ def load_and_preprocess_data():
     print("Train shape:", all_train.shape)
     print("Test shape:", test.shape)
 
-    # clicked == 1 데이터
-    clicked_1 = all_train[all_train['clicked'] == 1]
+    # feat_e_3 missing 기준으로 샘플링
+    # 1. feat_e_3이 missing인 데이터는 모두 포함
+    missing_feat_e_3 = all_train[all_train['feat_e_3'].isna()]
+    
+    # 2. feat_e_3이 있는 데이터 중에서 clicked == 1인 데이터
+    available_feat_e_3_clicked_1 = all_train[(all_train['feat_e_3'].notna()) & (all_train['clicked'] == 1)]
+    
+    # 3. feat_e_3이 있는 데이터 중에서 clicked == 0인 데이터
+    available_feat_e_3_clicked_0 = all_train[(all_train['feat_e_3'].notna()) & (all_train['clicked'] == 0)]
+    
+    # 4. missing 데이터에서 clicked=1 데이터를 뺀 만큼만 clicked=0 데이터에서 샘플링
+    target_size = len(missing_feat_e_3) - len(available_feat_e_3_clicked_1)
+    if target_size > 0 and len(available_feat_e_3_clicked_0) >= target_size:
+        sampled_clicked_0 = available_feat_e_3_clicked_0.sample(n=target_size, random_state=42)
+    else:
+        # target_size가 0 이하이거나 available 데이터가 부족하면 모두 사용
+        sampled_clicked_0 = available_feat_e_3_clicked_0
+    
+    # 5. 최종 훈련 데이터 구성
+    train = pd.concat([missing_feat_e_3, available_feat_e_3_clicked_1, sampled_clicked_0], axis=0).sample(frac=1, random_state=42).reset_index(drop=True)
 
-    # clicked == 0 데이터에서 동일 개수x2 만큼 무작위 추출 (다운 샘플링)
-    clicked_0 = all_train[all_train['clicked'] == 0].sample(n=len(clicked_1)*2, random_state=42)
-
-    # 두 데이터프레임 합치기
-    train = pd.concat([clicked_1, clicked_0], axis=0).sample(frac=1, random_state=42).reset_index(drop=True)
-
-    print("Train shape:", train.shape)
-    print("Train clicked:0:", train[train['clicked']==0].shape)
-    print("Train clicked:1:", train[train['clicked']==1].shape)
+    print("📊 샘플링 결과:")
+    print(f"  1. feat_e_3 missing 데이터: {len(missing_feat_e_3):,}개")
+    print(f"  2. feat_e_3 available + clicked=1: {len(available_feat_e_3_clicked_1):,}개")
+    print(f"  3. feat_e_3 available + clicked=0 (샘플링): {len(sampled_clicked_0):,}개")
+    print(f"  - 총 훈련 데이터: {len(train):,}개")
+    print(f"  - 최종 clicked=0: {len(train[train['clicked']==0]):,}개")
+    print(f"  - 최종 clicked=1: {len(train[train['clicked']==1]):,}개")
 
     # Target / Sequence
     target_col = "clicked"

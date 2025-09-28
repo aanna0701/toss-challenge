@@ -1,3 +1,4 @@
+import os
 from utils import seed_everything, load_config, print_config, print_valid_keys, get_device, apply_datetime_to_paths
 
 # Default Configuration
@@ -39,9 +40,9 @@ CFG = {
         'TEMP_MODEL': 'temp_model.pth',
         'SUBMISSION': 'baseline_submit.csv',
         'RESULTS_DIR': 'results',
-        'TRAIN_DATA': './train.parquet',
-        'TEST_DATA': './test.parquet',
-        'SAMPLE_SUBMISSION': './sample_submission.csv'
+        'TRAIN_DATA': 'train.parquet',
+        'TEST_DATA': 'test.parquet',
+        'SAMPLE_SUBMISSION': 'sample_submission.csv'
     }
 }
 
@@ -50,7 +51,11 @@ device = get_device()
 def load_project_config(config_path="config.yaml"):
     """프로젝트 설정을 로드하는 함수"""
     global CFG
-    CFG = load_config(config_path, CFG)
+    # 현재 스크립트의 디렉토리 기준으로 상대경로 설정
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_full_path = os.path.join(script_dir, config_path)
+    
+    CFG = load_config(config_full_path, CFG)
     # datetime 플레이스홀더를 실제 datetime으로 교체
     CFG = apply_datetime_to_paths(CFG)
     return CFG
