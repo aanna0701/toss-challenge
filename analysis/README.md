@@ -10,6 +10,7 @@ analysis/
 ├── chunk_eda.py                           # 메인 EDA 스크립트 (청크 단위)
 ├── chunk_utils.py                         # 청크 처리 유틸리티
 ├── eda_utils.py                           # EDA 유틸리티 함수들
+├── feature_quality_analysis.py            # 피처 품질 분석 스크립트
 ├── quick_eda.py                           # 빠른 EDA (샘플링 기반)
 ├── missing_pattern_analysis.py           # Missing pattern 분석
 ├── missing_overlap_analysis.py           # Missing pattern 중복 분석
@@ -21,6 +22,8 @@ analysis/
 └── results/                               # 분석 결과 저장 디렉토리
     ├── chunk_eda_results.json
     ├── chunk_eda_summary.png
+    ├── feature_quality_analysis.json
+    ├── feature_quality_analysis.png
     ├── missing_pattern_*.json
     ├── all_patterns_validation.json
     └── extreme_features_*.json
@@ -63,7 +66,40 @@ python analysis/quick_eda.py
 - 샘플 기반 기본 통계
 - 빠른 분포 확인
 
-### 2. Missing Pattern 분석
+### 2. 피처 품질 분석
+
+#### `feature_quality_analysis.py` - 피처 품질 분석
+```bash
+python analysis/feature_quality_analysis.py [--chunk_size 100000] [--data_path ./train.parquet]
+```
+
+**목적:**
+- 피처별 값 분포 분석으로 분별력이 낮은 피처 식별
+- 피처별 클릭률과의 상관관계 분석으로 연관성이 낮은 피처 식별
+
+**주요 기능:**
+
+**분포 품질 분석:**
+- **상수 피처**: 모든 값이 동일한 피처 (표준편차 = 0)
+- **낮은 분산 피처**: 변동계수(CV) < 0.01인 피처
+- **극단적 Sparse 피처**: 99% 이상이 0값인 피처
+
+**상관관계 품질 분석:**
+- **거의 0인 상관관계**: |correlation| < 0.0001인 피처
+- **매우 낮은 상관관계**: |correlation| < 0.001인 피처
+- **음의 상관관계**: correlation < -0.001인 피처
+
+**결과물:**
+- `results/feature_quality_analysis.json`: 상세 분석 결과
+- `results/feature_quality_analysis.png`: 시각화 결과
+- 문제 피처 목록 및 통계 요약
+
+**분석 결과 활용:**
+- 모델링에서 제거할 피처 후보 식별
+- 피처 선택 전략 수립
+- 데이터 품질 개선 방향 제시
+
+### 3. Missing Pattern 분석
 
 #### `missing_pattern_analysis.py` - Missing 패턴 식별
 ```bash
@@ -108,7 +144,7 @@ python analysis/validate_all_patterns.py
 - `results/all_patterns_validation.json`: 검증 결과
 - **확인된 사실**: 각 패턴별로 동일한 행에서 모든 features가 동시에 missing
 
-### 3. 극단적 Features 분석
+### 4. 극단적 Features 분석
 
 #### `extreme_features_analysis.py` - 치우친 features 식별
 ```bash
@@ -213,15 +249,18 @@ seaborn>=0.11.0
 # 1. 기본 EDA 실행
 python analysis/chunk_eda.py
 
-# 2. Missing pattern 분석
+# 2. 피처 품질 분석 실행
+python analysis/feature_quality_analysis.py
+
+# 3. Missing pattern 분석
 python analysis/missing_pattern_analysis.py
 
-# 3. 실제 데이터로 검증 (conda 환경에서)
+# 4. 실제 데이터로 검증 (conda 환경에서)
 conda activate toss-click-prediction-cpu
 python analysis/validate_all_patterns.py
 python analysis/validate_extreme_features_with_data.py
 
-# 4. 결과 확인
+# 5. 결과 확인
 ls analysis/results/
 ```
 
@@ -231,6 +270,24 @@ ls analysis/results/
 2. **Data Preprocessing**: 불필요한 features 제거
 3. **Model Architecture**: Missing pattern 기반 모델 설계
 4. **Performance Optimization**: 데이터 분할 전략 수립
+
+### 피처 품질 분석 결과 활용 예시
+```python
+import json
+
+# 분석 결과 로드
+with open('analysis/results/feature_quality_analysis.json', 'r') as f:
+    results = json.load(f)
+
+# 제거할 피처 목록 추출
+remove_features = []
+remove_features.extend([f['feature'] for f in results['distribution_issues']['constant']])
+remove_features.extend([f['feature'] for f in results['correlation_issues']['zero_correlation']])
+
+print(f"제거 권장 피처: {len(remove_features)}개")
+print(f"상수 피처: {results['summary']['constant_features']}개")
+print(f"상관관계 거의 0인 피처: {results['summary']['zero_correlation_features']}개")
+```
 
 ---
 
