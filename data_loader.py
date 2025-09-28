@@ -5,12 +5,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 class ClickDataset(Dataset):
-    def __init__(self, df, feature_cols, seq_col, target_col=None, has_target=True):
+    def __init__(self, df, feature_cols, seq_col, target_col=None, has_target=True, has_id=False):
         self.df = df.reset_index(drop=True)
         self.feature_cols = feature_cols
         self.seq_col = seq_col
         self.target_col = target_col
         self.has_target = has_target
+        self.has_id = has_id
 
         # 비-시퀀스 피처: 전부 연속값으로
         self.X = self.df[self.feature_cols].astype(float).fillna(0).values
@@ -39,15 +40,17 @@ class ClickDataset(Dataset):
 
         seq = torch.from_numpy(arr)  # shape (seq_len,)
 
-        # ID는 항상 반환 (train/val/test 구분 없이)
-        id_val = self.df.iloc[idx]['ID']
-        
         # 딕셔너리 형태로 반환
         item = {
             'x': x,
-            'seq': seq,
-            'id': id_val
+            'seq': seq
         }
+        
+        # ID가 필요한 경우에만 처리
+        if self.has_id:
+            if 'ID' not in self.df.columns:
+                raise ValueError("❌ ID가 필요한데 데이터에 'ID' 컬럼이 없습니다!")
+            item['id'] = self.df.iloc[idx]['ID']
         
         if self.has_target:
             y = torch.tensor(self.y[idx], dtype=torch.float)
@@ -59,7 +62,6 @@ def collate_fn_train(batch):
     # 딕셔너리 배치에서 값들 추출
     xs = [item['x'] for item in batch]
     seqs = [item['seq'] for item in batch]
-    ids = [item['id'] for item in batch]
     ys = [item['y'] for item in batch]  # has_target=True인 경우만
     
     xs = torch.stack(xs)
@@ -68,20 +70,28 @@ def collate_fn_train(batch):
     seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
     seq_lengths = torch.clamp(seq_lengths, min=1)  # 빈 시퀀스 방지
     
-    # 딕셔너리 형태로 배치 반환
+    # 딕셔너리 형태로 배치 반환 (훈련 시에는 ID가 없음)
     return {
         'xs': xs,
         'seqs': seqs_padded,
         'seq_lengths': seq_lengths,
-        'ys': ys,
-        'ids': ids
+        'ys': ys
     }
 
 def collate_fn_infer(batch):
     # 딕셔너리 배치에서 값들 추출
     xs = [item['x'] for item in batch]
     seqs = [item['seq'] for item in batch]
+    
+    # 예측 시에는 ID가 반드시 필요
+    if 'id' not in batch[0]:
+        raise ValueError("❌ 예측 시에는 ID가 반드시 필요합니다! 테스트 데이터에 'ID' 컬럼이 있는지 확인해주세요.")
+    
     ids = [item['id'] for item in batch]
+    
+    # ID에 None이 포함되어 있는지 확인
+    if any(id_val is None for id_val in ids):
+        raise ValueError("❌ ID 값에 None이 포함되어 있습니다! 테스트 데이터의 'ID' 컬럼을 확인해주세요.")
     
     xs = torch.stack(xs)
     seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
@@ -89,12 +99,14 @@ def collate_fn_infer(batch):
     seq_lengths = torch.clamp(seq_lengths, min=1)
     
     # 딕셔너리 형태로 배치 반환
-    return {
+    result = {
         'xs': xs,
         'seqs': seqs_padded,
         'seq_lengths': seq_lengths,
         'ids': ids
     }
+    
+    return result
 
 def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target_col, batch_size):
     """데이터로더 생성 함수"""
@@ -102,7 +114,7 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
     
     # Train dataset (train_df가 None이면 더미 데이터셋 생성)
     if train_df is not None and len(train_df) > 0:
-        train_dataset = ClickDataset(train_df, feature_cols, seq_col, target_col, has_target=True)
+        train_dataset = ClickDataset(train_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
     else:
         # 더미 데이터 생성 (최소 1개 행)
@@ -110,12 +122,12 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
         dummy_data[seq_col] = ["0.0"]
         dummy_data[target_col] = [0.0]
         dummy_train_df = pd.DataFrame(dummy_data)
-        train_dataset = ClickDataset(dummy_train_df, feature_cols, seq_col, target_col, has_target=True)
+        train_dataset = ClickDataset(dummy_train_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
     
     # Val dataset (val_df가 None이면 더미 데이터셋 생성)
     if val_df is not None and len(val_df) > 0:
-        val_dataset = ClickDataset(val_df, feature_cols, seq_col, target_col, has_target=True)
+        val_dataset = ClickDataset(val_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_train)
     else:
         # 더미 데이터 생성 (최소 1개 행)
@@ -123,16 +135,16 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
         dummy_data[seq_col] = ["0.0"]
         dummy_data[target_col] = [0.0]
         dummy_val_df = pd.DataFrame(dummy_data)
-        val_dataset = ClickDataset(dummy_val_df, feature_cols, seq_col, target_col, has_target=True)
+        val_dataset = ClickDataset(dummy_val_df, feature_cols, seq_col, target_col, has_target=True, has_id=False)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_train)
     
     # Test dataset (test_df가 None이면 더미 데이터셋 생성)
     if test_df is not None:
-        test_dataset = ClickDataset(test_df, feature_cols, seq_col, has_target=False)
+        test_dataset = ClickDataset(test_df, feature_cols, seq_col, has_target=False, has_id=True)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
     else:
         dummy_test_df = pd.DataFrame(columns=feature_cols + [seq_col])
-        test_dataset = ClickDataset(dummy_test_df, feature_cols, seq_col, has_target=False)
+        test_dataset = ClickDataset(dummy_test_df, feature_cols, seq_col, has_target=False, has_id=False)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
     
     return train_loader, val_loader, test_loader, train_dataset, val_dataset
@@ -190,9 +202,9 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
     
     print("📊 테스트 데이터 로드 중...")
     test = safe_load_parquet(CFG['PATHS']['TEST_DATA'], sample_size)
-    # ID 컬럼이 있는지 확인만 하고 그대로 유지
+    # 테스트 데이터에는 ID 컬럼이 반드시 있어야 함 (예측 시 필요)
     if 'ID' not in test.columns:
-        raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 데이터 파일을 확인해주세요.")
+        raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 예측을 위해서는 ID가 필요합니다.")
     
     print(f"✅ 테스트 데이터 로드 완료: {test.shape[0]}개 행, ID 컬럼 포함")
 
@@ -219,6 +231,11 @@ def load_and_preprocess_data(use_sampling=None, sample_size=None):
     # 학습에 사용할 피처: ID/seq/target 제외, 나머지 전부
     FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
     feature_cols = [c for c in train.columns if c not in FEATURE_EXCLUDE]
+
+    # 훈련 데이터에서 ID 컬럼 제거 (훈련 시에는 ID가 필요하지 않음)
+    if 'ID' in train.columns:
+        train = train.drop(columns=['ID'])
+        print("✅ 훈련 데이터에서 ID 컬럼 제거 완료")
 
     print("Num features:", len(feature_cols))
     print("Sequence:", seq_col)

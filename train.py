@@ -79,7 +79,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             seqs = batch.get('seqs').to(device)
             seq_lens = batch.get('seq_lengths').to(device)
             ys = batch.get('ys').to(device)
-            batch_ids = batch.get('ids', [])  # ID 정보 (필요시 사용)
+            # 훈련 시에는 ID가 없으므로 제거
             
             optimizer.zero_grad()
             logits = model(xs, seqs, seq_lens)

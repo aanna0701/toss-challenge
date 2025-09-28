@@ -16,14 +16,11 @@ def predict(model, test_loader, device="cuda"):
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Inference"):
-            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
+            # 딕셔너리 배치에서 필요한 값들 추출 (collate_fn_infer에서 이미 ID 검증 완료)
             xs = batch.get('xs').to(device)
             seqs = batch.get('seqs').to(device)
             seq_lengths = batch.get('seq_lengths').to(device)
-            batch_ids = batch.get('ids', [])  # 키가 없으면 빈 리스트 반환
-            
-            if not batch_ids:
-                raise ValueError("❌ 배치에서 'ids' 키를 찾을 수 없습니다!")
+            batch_ids = batch.get('ids', [])  # collate_fn_infer에서 이미 검증됨
             
             ids.extend(batch_ids)
             
@@ -87,8 +84,8 @@ def load_trained_model(feature_cols, model_path=None, device="cuda"):
 
 def run_inference(model, test_data, feature_cols, seq_col, batch_size, device="cuda"):
     """추론 실행 함수"""
-    # Test dataset 생성 (ID 정보는 데이터프레임에 포함되어 있음)
-    test_dataset = ClickDataset(test_data, feature_cols, seq_col, has_target=False)
+    # Test dataset 생성 (예측 시에는 ID가 반드시 필요)
+    test_dataset = ClickDataset(test_data, feature_cols, seq_col, has_target=False, has_id=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_infer)
     
     # 예측 수행
