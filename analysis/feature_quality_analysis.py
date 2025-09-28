@@ -351,8 +351,6 @@ class FeatureQualityAnalyzer:
             
             plt.tight_layout()
             plt.savefig(RESULTS_DIR / 'feature_quality_analysis.png', dpi=300, bbox_inches='tight')
-            plt.show()
-            
             print(f"✅ 시각화가 {RESULTS_DIR}/feature_quality_analysis.png에 저장되었습니다.")
             
         except Exception as e:
