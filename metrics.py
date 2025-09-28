@@ -95,7 +95,7 @@ def calculate_score(y_true, y_pred):
     }
 
 
-def evaluate_model(model, data_loader, device="cuda", model_type="tabular_seq"):
+def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transformer"):
     """
     모델 평가 함수
     
@@ -103,7 +103,7 @@ def evaluate_model(model, data_loader, device="cuda", model_type="tabular_seq"):
         model: 평가할 모델
         data_loader: 평가 데이터 로더
         device: 사용할 디바이스
-        model_type: 모델 타입 ("tabular_seq" 또는 "tabular_transformer")
+        model_type: 모델 타입 ("tabular_transformer")
     
     Returns:
         dict: 평가 결과 (loss, ap, wll, score)
@@ -119,26 +119,19 @@ def evaluate_model(model, data_loader, device="cuda", model_type="tabular_seq"):
         for batch in data_loader:
             ys = batch.get('ys').to(device)
             
-            if model_type == 'tabular_seq':
-                # TabularSeq 모델용 배치 처리
-                xs = batch.get('xs').to(device)
-                seqs = batch.get('seqs').to(device)
-                seq_lens = batch.get('seq_lengths').to(device)
-                logits = model(xs, seqs, seq_lens)
-            elif model_type == 'tabular_transformer':
-                # Transformer 모델용 배치 처리
-                x_categorical = batch.get('x_categorical').to(device)
-                x_numerical = batch.get('x_numerical').to(device)
-                seqs = batch.get('seqs').to(device)
-                seq_lens = batch.get('seq_lengths').to(device)
-                nan_mask = batch.get('nan_mask').to(device)
-                logits = model(
-                    x_categorical=x_categorical,
-                    x_numerical=x_numerical,
-                    x_seq=seqs,
-                    seq_lengths=seq_lens,
-                    nan_mask=nan_mask
-                )
+            # TabularTransformer 모델용 배치 처리
+            x_categorical = batch.get('x_categorical').to(device)
+            x_numerical = batch.get('x_numerical').to(device)
+            seqs = batch.get('seqs').to(device)
+            seq_lens = batch.get('seq_lengths').to(device)
+            nan_mask = batch.get('nan_mask').to(device)
+            logits = model(
+                x_categorical=x_categorical,
+                x_numerical=x_numerical,
+                x_seq=seqs,
+                seq_lengths=seq_lens,
+                nan_mask=nan_mask
+            )
             probs = torch.sigmoid(logits)
             
             # Loss 계산

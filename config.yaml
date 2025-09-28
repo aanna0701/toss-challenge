@@ -1,6 +1,6 @@
 # 기본 훈련 설정
 BATCH_SIZE: 4096
-EPOCHS: 100
+EPOCHS: 20
 LEARNING_RATE: 0.001
 SEED: 42
 
@@ -14,7 +14,7 @@ DATA:
 # Early Stopping 설정
 EARLY_STOPPING:
   ENABLED: true          # Early stopping 사용 여부
-  PATIENCE: 10            # 개선이 없는 에포크 수 (patience) - 테스트용
+  PATIENCE: 3            # 개선이 없는 에포크 수 (patience) - 테스트용
   MIN_DELTA: 0.00001       # 개선으로 인정할 최소 변화량
   MONITOR: "val_score"   # 모니터링할 메트릭 (val_loss, val_score 등)
   MODE: "max"           # 모니터링 모드 (min: 감소, max: 증가)
@@ -35,15 +35,8 @@ GRADIENT_NORM:
     - "model"           # 모델 부분 (MLP/Transformer 등)
     - "total"           # 전체 모델
 
-# 모델 설정
+# 모델 설정 - TabularTransformer만 사용
 MODEL:
-  TYPE: "tabular_transformer"  # 모델 타입: "tabular_seq" 또는 "tabular_transformer"
-  
-  # TabularSeq 모델 설정
-  LSTM_HIDDEN: 64      # LSTM 히든 사이즈
-  HIDDEN_UNITS: [256, 128]  # MLP 히든 레이어 유닛 수들
-  DROPOUT: 0.2         # 드롭아웃 비율
-  
   # TabularTransformer 모델 설정
   TRANSFORMER:
     HIDDEN_DIM: 192           # Transformer hidden dimension

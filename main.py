@@ -30,10 +30,16 @@ CFG = {
         'COMPONENTS': ['lstm', 'mlp', 'total']
     },
     'MODEL': {
-        'TYPE': 'tabular_seq',
-        'LSTM_HIDDEN': 64,
-        'HIDDEN_UNITS': [256, 128],
-        'DROPOUT': 0.2
+        'TRANSFORMER': {
+            'HIDDEN_DIM': 192,
+            'N_HEADS': 8,
+            'N_LAYERS': 3,
+            'FFN_SIZE_FACTOR': 1.333,
+            'ATTENTION_DROPOUT': 0.2,
+            'FFN_DROPOUT': 0.1,
+            'RESIDUAL_DROPOUT': 0.0,
+            'LSTM_HIDDEN': 32
+        }
     },
     'PATHS': {
         'MODEL_SAVE': 'trained_model.pth',
