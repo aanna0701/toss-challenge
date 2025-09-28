@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from main import CFG, device, initialize
 from data_loader import load_and_preprocess_data, create_data_loaders
-from model import *
+from model import create_tabular_seq_model, create_tabular_transformer_model
 from early_stopping import create_early_stopping_from_config
 from metrics import evaluate_model, print_metrics, save_training_logs, get_best_checkpoint_info
 from gradient_norm import (
@@ -21,14 +21,19 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     tr_df, va_df = train_test_split(train_df, test_size=CFG['VAL_SPLIT'], random_state=42, shuffle=True)
 
     # 2) Dataset / Loader
-    train_loader, val_loader, _, train_dataset, val_dataset = create_data_loaders(
-        tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE']
-    )
+    model_type = CFG['MODEL']['TYPE']
+    if model_type == "tabular_transformer":
+        train_loader, val_loader, _, train_dataset, val_dataset, feature_processor = create_data_loaders(
+            tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE'], model_type=model_type
+        )
+    else:
+        train_loader, val_loader, _, train_dataset, val_dataset = create_data_loaders(
+            tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE'], model_type=model_type
+        )
 
     # 3) 모델 선택 및 생성
-    d_features = len(feature_cols)
-    
-    if CFG['MODEL']['TYPE'] == 'tabular_seq':
+    if model_type == 'tabular_seq':
+        d_features = len(feature_cols)
         model = create_tabular_seq_model(
             d_features=d_features, 
             lstm_hidden=CFG['MODEL']['LSTM_HIDDEN'], 
@@ -36,8 +41,28 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             dropout=CFG['MODEL']['DROPOUT'], 
             device=device
         )
+    elif model_type == 'tabular_transformer':
+        # Transformer 모델용 피처 정보
+        categorical_cardinalities = list(feature_processor.categorical_cardinalities.values())
+        num_categorical_features = len(feature_processor.categorical_features)
+        num_numerical_features = len(feature_processor.numerical_features)
+        
+        model = create_tabular_transformer_model(
+            num_categorical_features=num_categorical_features,
+            categorical_cardinalities=categorical_cardinalities,
+            num_numerical_features=num_numerical_features,
+            lstm_hidden=CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN'],
+            hidden_dim=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
+            n_heads=CFG['MODEL']['TRANSFORMER']['N_HEADS'],
+            n_layers=CFG['MODEL']['TRANSFORMER']['N_LAYERS'],
+            ffn_size_factor=CFG['MODEL']['TRANSFORMER']['FFN_SIZE_FACTOR'],
+            attention_dropout=CFG['MODEL']['TRANSFORMER']['ATTENTION_DROPOUT'],
+            ffn_dropout=CFG['MODEL']['TRANSFORMER']['FFN_DROPOUT'],
+            residual_dropout=CFG['MODEL']['TRANSFORMER']['RESIDUAL_DROPOUT'],
+            device=device
+        )
     else:
-        raise ValueError(f"Unknown model type: {CFG['MODEL']['TYPE']}")
+        raise ValueError(f"Unknown model type: {model_type}")
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=CFG['LEARNING_RATE'])
@@ -74,15 +99,31 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
         epoch_gradient_norms = []
         
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch}")):
-            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
-            xs = batch.get('xs').to(device)
-            seqs = batch.get('seqs').to(device)
-            seq_lens = batch.get('seq_lengths').to(device)
-            ys = batch.get('ys').to(device)
-            # 훈련 시에는 ID가 없으므로 제거
-            
             optimizer.zero_grad()
-            logits = model(xs, seqs, seq_lens)
+            
+            if model_type == 'tabular_seq':
+                # TabularSeq 모델용 배치 처리
+                xs = batch.get('xs').to(device)
+                seqs = batch.get('seqs').to(device)
+                seq_lens = batch.get('seq_lengths').to(device)
+                ys = batch.get('ys').to(device)
+                logits = model(xs, seqs, seq_lens)
+            elif model_type == 'tabular_transformer':
+                # Transformer 모델용 배치 처리
+                x_categorical = batch.get('x_categorical').to(device)
+                x_numerical = batch.get('x_numerical').to(device)
+                seqs = batch.get('seqs').to(device)
+                seq_lens = batch.get('seq_lengths').to(device)
+                nan_mask = batch.get('nan_mask').to(device)
+                ys = batch.get('ys').to(device)
+                logits = model(
+                    x_categorical=x_categorical,
+                    x_numerical=x_numerical,
+                    x_seq=seqs,
+                    seq_lengths=seq_lens,
+                    nan_mask=nan_mask
+                )
+            
             loss = criterion(logits, ys)
             loss.backward()
             
@@ -119,7 +160,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             gradient_norm_logs.append(gradient_log_entry)
 
         # 검증 단계 및 메트릭 계산
-        val_metrics = evaluate_model(model, val_loader, device)
+        val_metrics = evaluate_model(model, val_loader, device, model_type)
         
         # 로그 출력
         print(f"[Epoch {epoch}] Train Loss: {train_loss:.4f}")

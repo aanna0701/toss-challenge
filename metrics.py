@@ -94,7 +94,7 @@ def calculate_score(y_true, y_pred):
     }
 
 
-def evaluate_model(model, data_loader, device="cuda"):
+def evaluate_model(model, data_loader, device="cuda", model_type="tabular_seq"):
     """
     모델 평가 함수
     
@@ -102,6 +102,7 @@ def evaluate_model(model, data_loader, device="cuda"):
         model: 평가할 모델
         data_loader: 평가 데이터 로더
         device: 사용할 디바이스
+        model_type: 모델 타입 ("tabular_seq" 또는 "tabular_transformer")
     
     Returns:
         dict: 평가 결과 (loss, ap, wll, score)
@@ -115,15 +116,28 @@ def evaluate_model(model, data_loader, device="cuda"):
     
     with torch.no_grad():
         for batch in data_loader:
-            # 딕셔너리 배치에서 필요한 값들 안전하게 추출
-            xs = batch.get('xs').to(device)
-            seqs = batch.get('seqs').to(device)
-            seq_lens = batch.get('seq_lengths').to(device)
             ys = batch.get('ys').to(device)
-            # 훈련 시에는 ID가 없으므로 제거
             
-            # 예측
-            logits = model(xs, seqs, seq_lens)
+            if model_type == 'tabular_seq':
+                # TabularSeq 모델용 배치 처리
+                xs = batch.get('xs').to(device)
+                seqs = batch.get('seqs').to(device)
+                seq_lens = batch.get('seq_lengths').to(device)
+                logits = model(xs, seqs, seq_lens)
+            elif model_type == 'tabular_transformer':
+                # Transformer 모델용 배치 처리
+                x_categorical = batch.get('x_categorical').to(device)
+                x_numerical = batch.get('x_numerical').to(device)
+                seqs = batch.get('seqs').to(device)
+                seq_lens = batch.get('seq_lengths').to(device)
+                nan_mask = batch.get('nan_mask').to(device)
+                logits = model(
+                    x_categorical=x_categorical,
+                    x_numerical=x_numerical,
+                    x_seq=seqs,
+                    seq_lengths=seq_lens,
+                    nan_mask=nan_mask
+                )
             probs = torch.sigmoid(logits)
             
             # Loss 계산

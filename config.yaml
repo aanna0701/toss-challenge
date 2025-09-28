@@ -38,10 +38,38 @@ GRADIENT_NORM:
 
 # 모델 설정
 MODEL:
-  TYPE: "tabular_seq"  # 모델 타입
+  TYPE: "tabular_transformer"  # 모델 타입: "tabular_seq" 또는 "tabular_transformer"
+  
+  # TabularSeq 모델 설정
   LSTM_HIDDEN: 64      # LSTM 히든 사이즈
   HIDDEN_UNITS: [256, 128]  # MLP 히든 레이어 유닛 수들
   DROPOUT: 0.2         # 드롭아웃 비율
+  
+  # TabularTransformer 모델 설정
+  TRANSFORMER:
+    HIDDEN_DIM: 192           # Transformer hidden dimension
+    N_HEADS: 8                # Number of attention heads
+    N_LAYERS: 3               # Number of transformer layers
+    FFN_SIZE_FACTOR: 1.333    # FFN size factor (4/3)
+    ATTENTION_DROPOUT: 0.2    # Attention dropout rate
+    FFN_DROPOUT: 0.1          # FFN dropout rate
+    RESIDUAL_DROPOUT: 0.0     # Residual dropout rate
+    LSTM_HIDDEN: 32           # LSTM hidden size for sequential features
+    
+  # 피처 분류 설정 (chunk_eda_results.json 기반)
+  FEATURES:
+    CATEGORICAL:              # 실제 범주형 피처들 (categorical_stats)
+      - "gender"
+      - "age_group" 
+      - "inventory_id"
+      - "day_of_week"
+      - "hour"
+    NUMERICAL:                # 수치형 피처들 (numerical_stats에서 l_feat_20, l_feat_23 제외)
+      # l_feat_*, feat_*, history_* 등 (l_feat_20, l_feat_23 제외)
+    EXCLUDED:                 # 사용하지 않을 피처들
+      - "l_feat_20"           # 상수값 (std=0.0)
+      - "l_feat_23"           # 상수값 (std=0.0)
+    SEQUENTIAL: "seq"         # 시퀀스 피처
 
 # 파일 경로 설정
 PATHS:

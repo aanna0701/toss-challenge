@@ -124,9 +124,15 @@ def main():
         print_progress(4, total_steps, "모델 훈련")
         print(f"🏋️ 모델 설정:")
         print(f"   • Type: {CFG['MODEL']['TYPE']}")
-        print(f"   • LSTM Hidden: {CFG['MODEL']['LSTM_HIDDEN']}")
-        print(f"   • Hidden Units: {CFG['MODEL']['HIDDEN_UNITS']}")
-        print(f"   • Dropout: {CFG['MODEL']['DROPOUT']}")
+        if CFG['MODEL']['TYPE'] == 'tabular_seq':
+            print(f"   • LSTM Hidden: {CFG['MODEL']['LSTM_HIDDEN']}")
+            print(f"   • Hidden Units: {CFG['MODEL']['HIDDEN_UNITS']}")
+            print(f"   • Dropout: {CFG['MODEL']['DROPOUT']}")
+        elif CFG['MODEL']['TYPE'] == 'tabular_transformer':
+            print(f"   • Hidden Dim: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
+            print(f"   • N Heads: {CFG['MODEL']['TRANSFORMER']['N_HEADS']}")
+            print(f"   • N Layers: {CFG['MODEL']['TRANSFORMER']['N_LAYERS']}")
+            print(f"   • LSTM Hidden: {CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN']}")
         
         model = train_model(
             train_df=train_data,

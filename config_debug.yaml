@@ -1,0 +1,81 @@
+# 디버깅용 설정 (샘플링 10개)
+BATCH_SIZE: 4
+EPOCHS: 2
+LEARNING_RATE: 0.001
+SEED: 42
+
+# 검증 데이터 분할 비율
+VAL_SPLIT: 0.2
+
+# 데이터 샘플링 설정
+DATA:
+  USE_SAMPLING: true       # 샘플링 사용
+  SAMPLE_SIZE: 10         # 샘플 크기 10개
+
+# Early Stopping 설정
+EARLY_STOPPING:
+  ENABLED: false          # 디버깅용으로 비활성화
+  PATIENCE: 3
+  MIN_DELTA: 0.00001
+  MONITOR: "val_score"
+  MODE: "max"
+  RESTORE_BEST_WEIGHTS: true
+
+# 메트릭 설정
+METRICS:
+  SAVE_LOGS: true
+  LOG_FILE: "train_logs_debug.csv"
+
+# Gradient Norm 설정
+GRADIENT_NORM:
+  ENABLED: true
+  SAVE_LOGS: true
+  LOG_FILE: "gradient_norms_debug.csv"
+  COMPONENTS:
+    - "lstm"
+    - "mlp"
+    - "total"
+
+# 모델 설정
+MODEL:
+  TYPE: "tabular_transformer"  # Transformer 모델 테스트
+  
+  # TabularSeq 모델 설정
+  LSTM_HIDDEN: 32
+  HIDDEN_UNITS: [256, 128]
+  DROPOUT: 0.2
+  
+  # TabularTransformer 모델 설정
+  TRANSFORMER:
+    HIDDEN_DIM: 192
+    N_HEADS: 8
+    N_LAYERS: 3
+    FFN_SIZE_FACTOR: 1.333
+    ATTENTION_DROPOUT: 0.2
+    FFN_DROPOUT: 0.1
+    RESIDUAL_DROPOUT: 0.0
+    LSTM_HIDDEN: 32
+    
+  # 피처 분류 설정 (chunk_eda_results.json 기반)
+  FEATURES:
+    CATEGORICAL:
+      - "gender"
+      - "age_group" 
+      - "inventory_id"
+      - "day_of_week"
+      - "hour"
+    NUMERICAL:
+    EXCLUDED:
+      - "l_feat_20"
+      - "l_feat_23"
+    SEQUENTIAL: "seq"
+
+# 파일 경로 설정
+PATHS:
+  MODEL_SAVE: "trained_model_debug_{datetime}.pth"
+  TEMP_MODEL: "temp_model_debug_{datetime}.pth"
+  SUBMISSION: "baseline_submit_debug.csv"
+  RESULTS_DIR: "results_debug"
+  TRAIN_DATA: "./train.parquet"
+  TEST_DATA: "./test.parquet"
+  SAMPLE_SUBMISSION: "./sample_submission.csv"
