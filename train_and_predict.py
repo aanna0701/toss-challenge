@@ -102,8 +102,7 @@ def main():
         "Epochs": CFG['EPOCHS'],
         "Batch Size": CFG['BATCH_SIZE'],
         "Learning Rate": CFG['LEARNING_RATE'],
-        "Data Sampling": CFG['DATA']['USE_SAMPLING'],
-        "Sample Size": CFG['DATA']['SAMPLE_SIZE']
+        "Data Loading": "전체 데이터 사용"
     })
     
     # 2. 결과 디렉토리 생성
@@ -119,8 +118,7 @@ def main():
     try:
         # 4. 데이터 로드 및 전처리
         print_progress(3, total_steps, "데이터 로드 및 전처리")
-        # 훈련 데이터: config.yaml의 USE_SAMPLING 설정에 따라 샘플링 또는 전체 로드
-        # 테스트 데이터: 무조건 전체 데이터 로드 (force_full_load=True)
+        # 전체 데이터 로드 (훈련 시 클래스 불균형 해결을 위한 다운샘플링 적용)
         train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data()
         print_step_summary("데이터 로드", {
             "Train Shape": train_data.shape,
@@ -129,8 +127,8 @@ def main():
             "Sequence Column": seq_col,
             "Target Column": target_col,
             "Test ID Column": "ID" in test_data.columns,
-            "Data Sampling": CFG['DATA']['USE_SAMPLING'],
-            "Test Data": "전체 로드 (샘플링 없음)"
+            "Data Loading": "전체 데이터 사용",
+            "Class Balancing": "다운샘플링 적용"
         })
         
         # 5. 모델 훈련
