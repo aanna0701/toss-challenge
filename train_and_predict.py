@@ -7,8 +7,14 @@ import os
 import shutil
 from datetime import datetime
 import pandas as pd
+import yaml
 
-from main import CFG, device, initialize
+# config_debug.yaml 로드
+with open('config_debug.yaml', 'r', encoding='utf-8') as f:
+    CFG = yaml.safe_load(f)
+
+from main import device
+from utils import seed_everything
 from data_loader import load_and_preprocess_data
 from model import *
 from train import train_model, save_model
@@ -88,7 +94,9 @@ def main():
     
     # 1. 초기화
     print_progress(1, total_steps, "시스템 초기화")
-    initialize()
+    # 시드 고정
+    seed_everything(CFG['SEED'])
+    print(f"Device: {device}")
     print_step_summary("초기화", {
         "Device": device,
         "Epochs": CFG['EPOCHS'],
