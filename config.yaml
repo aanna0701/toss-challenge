@@ -7,9 +7,10 @@ SEED: 42
 # 검증 데이터 분할 비율
 VAL_SPLIT: 0.2
 
-# 데이터 설정
+# 데이터 샘플링 설정
 DATA:
-  # 전체 데이터 사용 (샘플링 없음)
+  USE_SAMPLING: false       # 샘플링 사용 여부 (true: 샘플링, false: 전체 데이터)
+  SAMPLE_SIZE: 3000       # 샘플 크기 (행 수) - gradient norm 테스트용
 
 # Early Stopping 설정
 EARLY_STOPPING:

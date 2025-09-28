@@ -8,7 +8,8 @@ CFG = {
     'SEED': 42,
     'VAL_SPLIT': 0.2,
     'DATA': {
-        # 전체 데이터 사용 (샘플링 없음)
+        'USE_SAMPLING': True,
+        'SAMPLE_SIZE': 1000000
     },
     'EARLY_STOPPING': {
         'ENABLED': True,

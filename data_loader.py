@@ -437,25 +437,62 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
         
         return train_loader, val_loader, test_loader, train_dataset, val_dataset
 
-def load_and_preprocess_data():
+def load_and_preprocess_data(use_sampling=None, sample_size=None):
     """데이터 로드 및 전처리 함수"""
     from main import CFG
     
-    def safe_load_parquet(file_path):
-        """안전한 parquet 로드 함수 - 항상 전체 데이터 로드"""
-        print(f"📊 전체 데이터 로드 - {file_path}")
-        try:
-            return pd.read_parquet(file_path, engine="pyarrow")
-        except Exception as e:
-            print(f"⚠️  데이터 로드 실패: {e}")
-            raise
+    # config에서 샘플링 설정 가져오기 (매개변수가 없으면 config 사용)
+    if use_sampling is None:
+        use_sampling = CFG['DATA']['USE_SAMPLING']
+    if sample_size is None:
+        sample_size = CFG['DATA']['SAMPLE_SIZE']
+    
+    def safe_load_parquet(file_path, sample_size=None, force_full_load=False):
+        """안전한 parquet 로드 함수"""
+        # force_full_load가 True이거나 use_sampling이 False이면 전체 데이터 로드
+        if force_full_load or not use_sampling:
+            print(f"📊 전체 데이터 로드 모드 - {file_path}")
+            try:
+                return pd.read_parquet(file_path, engine="pyarrow")
+            except Exception as e:
+                print(f"⚠️  전체 데이터 로드 실패: {e}")
+                print("메모리 부족으로 인한 오류일 수 있습니다. 샘플링을 권장합니다.")
+                raise
+        else:
+            print(f"📊 샘플링 모드 활성화 - {file_path}")
+            try:
+                import pyarrow.parquet as pq
+                parquet_file = pq.ParquetFile(file_path)
+                total_rows = parquet_file.metadata.num_rows
+                
+                if sample_size and total_rows > sample_size:
+                    print(f"📊 {total_rows:,} 행 중 {sample_size:,} 행 샘플링")
+                    sample_ratio = sample_size / total_rows
+                    
+                    chunks = []
+                    for batch in parquet_file.iter_batches(batch_size=50000):
+                        chunk_df = batch.to_pandas()
+                        chunk_sample = chunk_df.sample(frac=sample_ratio, random_state=42)
+                        chunks.append(chunk_sample)
+                        
+                        if sum(len(chunk) for chunk in chunks) >= sample_size:
+                            break
+                    
+                    return pd.concat(chunks, ignore_index=True).head(sample_size)
+                else:
+                    return pd.read_parquet(file_path, engine="pyarrow")
+            except Exception as e:
+                print(f"⚠️  샘플링 중 오류 발생: {e}")
+                print("전체 데이터 로드로 대체...")
+                return pd.read_parquet(file_path, engine="pyarrow")
     
     # 데이터 로드
     print("📊 훈련 데이터 로드 중...")
-    all_train = safe_load_parquet(CFG['PATHS']['TRAIN_DATA'])
+    all_train = safe_load_parquet(CFG['PATHS']['TRAIN_DATA'], sample_size)
     
     print("📊 테스트 데이터 로드 중...")
-    test = safe_load_parquet(CFG['PATHS']['TEST_DATA'])
+    # 테스트 데이터는 무조건 전체 로드
+    test = safe_load_parquet(CFG['PATHS']['TEST_DATA'], sample_size, force_full_load=True)
     # 테스트 데이터에는 ID 컬럼이 반드시 있어야 함 (예측 시 필요)
     if 'ID' not in test.columns:
         raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 예측을 위해서는 ID가 필요합니다.")
