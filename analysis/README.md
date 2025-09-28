@@ -11,6 +11,7 @@ analysis/
 ├── chunk_utils.py                         # 청크 처리 유틸리티
 ├── eda_utils.py                           # EDA 유틸리티 함수들
 ├── feature_quality_analysis.py            # 피처 품질 분석 스크립트
+├── compute_normalization_stats.py         # 표준화 통계 계산 스크립트
 ├── quick_eda.py                           # 빠른 EDA (샘플링 기반)
 ├── missing_pattern_analysis.py           # Missing pattern 분석
 ├── missing_overlap_analysis.py           # Missing pattern 중복 분석
@@ -24,6 +25,7 @@ analysis/
     ├── chunk_eda_summary.png
     ├── feature_quality_analysis.json
     ├── feature_quality_analysis.png
+    ├── normalization_stats.json
     ├── missing_pattern_*.json
     ├── all_patterns_validation.json
     └── extreme_features_*.json
@@ -66,7 +68,61 @@ python analysis/quick_eda.py
 - 샘플 기반 기본 통계
 - 빠른 분포 확인
 
-### 2. 피처 품질 분석
+### 2. 표준화 통계 계산
+
+#### `compute_normalization_stats.py` - 표준화 통계 계산
+```bash
+python analysis/compute_normalization_stats.py
+```
+
+**목적:**
+- 전체 train set에서 각 피처의 mean/std를 계산
+- 표준화(normalization)에 사용할 통계값 제공
+- 메모리 효율적인 청크 단위 처리
+
+**주요 기능:**
+- **메모리 효율적**: 1천만 행 이상의 대용량 데이터를 청크 단위로 처리
+- **자동 제외**: ID, target, sequence 컬럼은 자동으로 제외
+- **완전한 통계**: mean, std, min, max, count 정보 제공
+- **진행률 표시**: 처리 진행 상황을 실시간으로 확인 가능
+
+**결과물:**
+- `results/normalization_stats.json`: 계산된 통계 결과
+- 112개 피처의 표준화 통계 (ID, clicked, seq 제외)
+
+**사용법:**
+```python
+import json
+
+# 통계 로드
+with open('analysis/results/normalization_stats.json', 'r') as f:
+    stats = json.load(f)
+
+# 특정 피처의 mean, std 가져오기
+feature_name = 'l_feat_1'
+mean = stats['statistics'][feature_name]['mean']
+std = stats['statistics'][feature_name]['std']
+
+# 데이터 표준화
+normalized_data = (raw_data - mean) / std
+
+# 역표준화 (예측 결과를 원래 스케일로)
+denormalized_data = normalized_data * std + mean
+```
+
+**PyTorch에서 사용:**
+```python
+import torch
+
+# 통계를 텐서로 변환
+mean_tensor = torch.tensor(mean, dtype=torch.float32)
+std_tensor = torch.tensor(std, dtype=torch.float32)
+
+# 배치 데이터 표준화
+normalized_batch = (batch_data - mean_tensor) / std_tensor
+```
+
+### 3. 피처 품질 분석
 
 #### `feature_quality_analysis.py` - 피처 품질 분석
 ```bash
@@ -79,15 +135,21 @@ python analysis/feature_quality_analysis.py [--chunk_size 100000] [--data_path .
 
 **주요 기능:**
 
-**분포 품질 분석:**
+**수치형 피처 분포 품질 분석:**
 - **상수 피처**: 모든 값이 동일한 피처 (표준편차 = 0)
 - **낮은 분산 피처**: 변동계수(CV) < 0.01인 피처
 - **극단적 Sparse 피처**: 99% 이상이 0값인 피처
 
-**상관관계 품질 분석:**
+**수치형 피처 상관관계 품질 분석:**
 - **거의 0인 상관관계**: |correlation| < 0.0001인 피처
 - **매우 낮은 상관관계**: |correlation| < 0.001인 피처
 - **음의 상관관계**: correlation < -0.001인 피처
+
+**범주형 피처 품질 분석 (ANOVA 기반):**
+- **낮은 CTR 편차**: 카테고리별 클릭률 편차가 낮은 피처
+- **지배적 카테고리**: 한 카테고리가 95% 이상인 피처
+- **적은 카테고리**: 카테고리가 2개 이하인 피처
+- **낮은 ANOVA F-statistic**: 카테고리 간 유의미한 차이가 없는 피처
 
 **결과물:**
 - `results/feature_quality_analysis.json`: 상세 분석 결과
@@ -95,11 +157,12 @@ python analysis/feature_quality_analysis.py [--chunk_size 100000] [--data_path .
 - 문제 피처 목록 및 통계 요약
 
 **분석 결과 활용:**
+- 수치형/범주형 피처 모두에 대한 종합적인 품질 평가
 - 모델링에서 제거할 피처 후보 식별
-- 피처 선택 전략 수립
+- 피처 선택 전략 수립 (수치형: 상관관계, 범주형: ANOVA 기반)
 - 데이터 품질 개선 방향 제시
 
-### 3. Missing Pattern 분석
+### 4. Missing Pattern 분석
 
 #### `missing_pattern_analysis.py` - Missing 패턴 식별
 ```bash
@@ -144,7 +207,7 @@ python analysis/validate_all_patterns.py
 - `results/all_patterns_validation.json`: 검증 결과
 - **확인된 사실**: 각 패턴별로 동일한 행에서 모든 features가 동시에 missing
 
-### 4. 극단적 Features 분석
+### 5. 극단적 Features 분석
 
 #### `extreme_features_analysis.py` - 치우친 features 식별
 ```bash
@@ -249,18 +312,21 @@ seaborn>=0.11.0
 # 1. 기본 EDA 실행
 python analysis/chunk_eda.py
 
-# 2. 피처 품질 분석 실행
+# 2. 표준화 통계 계산
+python analysis/compute_normalization_stats.py
+
+# 3. 피처 품질 분석 실행
 python analysis/feature_quality_analysis.py
 
-# 3. Missing pattern 분석
+# 4. Missing pattern 분석
 python analysis/missing_pattern_analysis.py
 
-# 4. 실제 데이터로 검증 (conda 환경에서)
+# 5. 실제 데이터로 검증 (conda 환경에서)
 conda activate toss-click-prediction-cpu
 python analysis/validate_all_patterns.py
 python analysis/validate_extreme_features_with_data.py
 
-# 5. 결과 확인
+# 6. 결과 확인
 ls analysis/results/
 ```
 
@@ -284,9 +350,15 @@ remove_features = []
 remove_features.extend([f['feature'] for f in results['distribution_issues']['constant']])
 remove_features.extend([f['feature'] for f in results['correlation_issues']['zero_correlation']])
 
+# 범주형 피처도 포함 (있는 경우)
+if 'categorical_issues' in results:
+    remove_features.extend([f['feature'] for f in results['categorical_issues']['low_anova_f']])
+
 print(f"제거 권장 피처: {len(remove_features)}개")
-print(f"상수 피처: {results['summary']['constant_features']}개")
-print(f"상관관계 거의 0인 피처: {results['summary']['zero_correlation_features']}개")
+print(f"수치형 - 상수 피처: {results['summary']['constant_features']}개")
+print(f"수치형 - 상관관계 거의 0인 피처: {results['summary']['zero_correlation_features']}개")
+if 'low_anova_f_categorical' in results['summary']:
+    print(f"범주형 - 낮은 ANOVA F 피처: {results['summary']['low_anova_f_categorical']}개")
 ```
 
 ---

@@ -28,7 +28,7 @@ plt.rcParams['axes.unicode_minus'] = False
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import seed_everything
-from analysis.chunk_utils import OnlineStats, ChunkCorrelationCalculator
+from analysis.chunk_utils import OnlineStats, ChunkCorrelationCalculator, ChunkCategoricalAnalyzer
 
 # 결과 저장 폴더
 RESULTS_DIR = Path("analysis/results")
@@ -53,6 +53,7 @@ class FeatureQualityAnalyzer:
         # 분석 결과 저장
         self.feature_stats = defaultdict(lambda: OnlineStats())
         self.correlation_calculator = ChunkCorrelationCalculator()
+        self.categorical_analyzer = ChunkCategoricalAnalyzer()
         self.categorical_features = []
         self.numerical_features = []
         
@@ -83,8 +84,8 @@ class FeatureQualityAnalyzer:
     
     def categorize_features(self, columns):
         """피처를 카테고리별로 분류"""
-        # 타겟과 기본 피처 제외
-        exclude_cols = ['clicked', 'gender', 'age_group', 'inventory_id', 'day_of_week', 'hour', 'seq']
+        # 타겟과 시퀀스 제외
+        exclude_cols = ['clicked', 'seq']
         
         for col in columns:
             if col not in exclude_cols:
@@ -102,6 +103,8 @@ class FeatureQualityAnalyzer:
         print(f"\n📋 피처 분류:")
         print(f"   - 수치형 피처: {len(self.numerical_features)}개")
         print(f"   - 카테고리형 피처: {len(self.categorical_features)}개")
+        if self.categorical_features:
+            print(f"   - 카테고리형 피처 예시: {self.categorical_features[:5]}")
     
     def analyze_chunks(self):
         """청크별 분석 수행"""
@@ -125,6 +128,9 @@ class FeatureQualityAnalyzer:
         for col in self.numerical_features:
             if col in chunk_df.columns:
                 self.feature_stats[col].update_batch(chunk_df[col])
+        
+        # 범주형 피처 분석 업데이트
+        self.categorical_analyzer.update_chunk(chunk_df, self.categorical_features)
         
         # 상관관계 계산기 업데이트
         self.correlation_calculator.update_chunk(chunk_df)
@@ -254,6 +260,119 @@ class FeatureQualityAnalyzer:
         
         return correlation_issues, correlations
     
+    def analyze_categorical_quality(self):
+        """범주형 피처 품질 분석 (ANOVA 기반)"""
+        print("\n" + "="*60)
+        print("📊 범주형 피처 품질 분석 (ANOVA)")
+        print("="*60)
+        
+        categorical_analysis = self.categorical_analyzer.get_category_analysis()
+        
+        categorical_issues = {
+            'low_variance': [],      # 카테고리별 CTR 편차가 낮은 피처
+            'dominant_category': [], # 한 카테고리가 95% 이상인 피처
+            'few_categories': [],    # 카테고리가 2개 이하인 피처
+            'low_anova_f': []        # ANOVA F-statistic이 낮은 피처
+        }
+        
+        for feature, categories in categorical_analysis.items():
+            if not categories:
+                continue
+            
+            # 카테고리 개수
+            num_categories = len(categories)
+            
+            # 카테고리별 통계
+            ctr_values = [stats['target_rate'] for stats in categories.values()]
+            counts = [stats['count'] for stats in categories.values()]
+            total_count = sum(counts)
+            
+            # CTR 편차 계산
+            ctr_std = np.std(ctr_values)
+            ctr_mean = np.mean(ctr_values)
+            ctr_cv = ctr_std / ctr_mean if ctr_mean > 0 else 0
+            
+            # 가장 큰 카테고리 비율
+            max_category_ratio = max(counts) / total_count
+            
+            # ANOVA F-statistic 계산 (간단한 버전)
+            # Between-group variance / Within-group variance
+            if len(ctr_values) > 1 and ctr_std > 0:
+                # 간단한 F-statistic 근사치
+                anova_f = (ctr_std ** 2) / (ctr_mean * (1 - ctr_mean)) if ctr_mean > 0 and ctr_mean < 1 else 0
+            else:
+                anova_f = 0
+            
+            # 문제점 식별
+            if ctr_cv < 0.01:  # CTR 편차가 매우 낮음
+                categorical_issues['low_variance'].append({
+                    'feature': feature,
+                    'ctr_cv': ctr_cv,
+                    'ctr_std': ctr_std,
+                    'num_categories': num_categories
+                })
+            
+            if max_category_ratio > 0.95:  # 한 카테고리가 95% 이상
+                categorical_issues['dominant_category'].append({
+                    'feature': feature,
+                    'max_ratio': max_category_ratio,
+                    'num_categories': num_categories
+                })
+            
+            if num_categories <= 2:  # 카테고리가 2개 이하
+                categorical_issues['few_categories'].append({
+                    'feature': feature,
+                    'num_categories': num_categories,
+                    'categories': list(categories.keys())
+                })
+            
+            if anova_f < 0.001:  # ANOVA F-statistic이 매우 낮음
+                categorical_issues['low_anova_f'].append({
+                    'feature': feature,
+                    'anova_f': anova_f,
+                    'ctr_cv': ctr_cv,
+                    'num_categories': num_categories
+                })
+        
+        # 결과 출력
+        self.print_categorical_issues(categorical_issues)
+        
+        return categorical_issues, categorical_analysis
+    
+    def print_categorical_issues(self, categorical_issues):
+        """범주형 피처 문제점 출력"""
+        print(f"\n🚨 범주형 피처 품질 문제들:")
+        
+        # 낮은 CTR 편차
+        if categorical_issues['low_variance']:
+            print(f"\n⚠️ 낮은 CTR 편차 피처 ({len(categorical_issues['low_variance'])}개):")
+            for item in sorted(categorical_issues['low_variance'], key=lambda x: x['ctr_cv'])[:10]:
+                print(f"   - {item['feature']}: CTR CV={item['ctr_cv']:.6f}, 카테고리 수={item['num_categories']}")
+            if len(categorical_issues['low_variance']) > 10:
+                print(f"   ... 총 {len(categorical_issues['low_variance'])}개")
+        
+        # 지배적 카테고리
+        if categorical_issues['dominant_category']:
+            print(f"\n⚠️ 지배적 카테고리 피처 ({len(categorical_issues['dominant_category'])}개):")
+            for item in sorted(categorical_issues['dominant_category'], key=lambda x: x['max_ratio'], reverse=True)[:10]:
+                print(f"   - {item['feature']}: 최대 비율={item['max_ratio']:.3f}, 카테고리 수={item['num_categories']}")
+            if len(categorical_issues['dominant_category']) > 10:
+                print(f"   ... 총 {len(categorical_issues['dominant_category'])}개")
+        
+        # 적은 카테고리
+        if categorical_issues['few_categories']:
+            print(f"\n⚠️ 적은 카테고리 피처 ({len(categorical_issues['few_categories'])}개):")
+            for item in categorical_issues['few_categories']:
+                print(f"   - {item['feature']}: 카테고리 수={item['num_categories']}, 카테고리={item['categories']}")
+        
+        # 낮은 ANOVA F-statistic
+        if categorical_issues['low_anova_f']:
+            print(f"\n❌ 낮은 ANOVA F-statistic 피처 ({len(categorical_issues['low_anova_f'])}개):")
+            for item in sorted(categorical_issues['low_anova_f'], key=lambda x: x['anova_f'])[:10]:
+                print(f"   - {item['feature']}: F-stat={item['anova_f']:.6f}, CTR CV={item['ctr_cv']:.6f}")
+            if len(categorical_issues['low_anova_f']) > 10:
+                print(f"   ... 총 {len(categorical_issues['low_anova_f'])}개")
+    
     def print_correlation_issues(self, correlation_issues, correlations):
         """상관관계 문제점 출력"""
         print(f"\n🚨 상관관계 품질 문제 피처들:")
@@ -288,12 +407,15 @@ class FeatureQualityAnalyzer:
         for feature, corr in top_correlations:
             print(f"   - {feature}: {corr:.6f}")
     
-    def create_visualizations(self, distribution_issues, correlation_issues, correlations):
+    def create_visualizations(self, distribution_issues, correlation_issues, correlations, categorical_issues=None):
         """시각화 생성"""
         print(f"\n📊 시각화 생성 중...")
         
         try:
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+            if categorical_issues:
+                fig, axes = plt.subplots(3, 2, figsize=(15, 18))
+            else:
+                fig, axes = plt.subplots(2, 2, figsize=(15, 12))
             
             # 1. 상관관계 분포 히스토그램
             corr_values = list(correlations.values())
@@ -349,6 +471,29 @@ class FeatureQualityAnalyzer:
             axes[1, 1].set_title('Correlation vs Feature Variance')
             axes[1, 1].grid(True, alpha=0.3)
             
+            # 범주형 분석 시각화 (있는 경우)
+            if categorical_issues:
+                # 5. 범주형 피처 문제 카운트
+                cat_issue_counts = [
+                    len(categorical_issues['low_variance']),
+                    len(categorical_issues['dominant_category']),
+                    len(categorical_issues['few_categories']),
+                    len(categorical_issues['low_anova_f'])
+                ]
+                cat_issue_labels = ['Low CTR Var', 'Dominant Cat', 'Few Cats', 'Low ANOVA F']
+                
+                axes[2, 0].bar(range(len(cat_issue_counts)), cat_issue_counts, color=['orange', 'red', 'purple', 'brown'])
+                axes[2, 0].set_title('Categorical Feature Issues Count')
+                axes[2, 0].set_xticks(range(len(cat_issue_labels)))
+                axes[2, 0].set_xticklabels(cat_issue_labels, rotation=45)
+                axes[2, 0].set_ylabel('Count')
+                
+                # 6. 범주형 피처별 카테고리 수 분포
+                cat_features = list(categorical_issues.keys())
+                cat_counts = [len(categorical_issues[key]) for key in cat_features]
+                axes[2, 1].pie(cat_counts, labels=cat_issue_labels, autopct='%1.1f%%', startangle=90)
+                axes[2, 1].set_title('Categorical Issues Distribution')
+            
             plt.tight_layout()
             plt.savefig(RESULTS_DIR / 'feature_quality_analysis.png', dpi=300, bbox_inches='tight')
             print(f"✅ 시각화가 {RESULTS_DIR}/feature_quality_analysis.png에 저장되었습니다.")
@@ -356,14 +501,15 @@ class FeatureQualityAnalyzer:
         except Exception as e:
             print(f"⚠️ 시각화 생성 실패: {e}")
     
-    def save_results(self, distribution_issues, correlation_issues, correlations):
+    def save_results(self, distribution_issues, correlation_issues, correlations, categorical_issues=None, categorical_analysis=None):
         """결과 저장"""
         print(f"\n💾 결과 저장 중...")
         
         # 전체 결과 구성
         results = {
             'analysis_info': {
-                'total_features_analyzed': len(self.numerical_features),
+                'total_numerical_features': len(self.numerical_features),
+                'total_categorical_features': len(self.categorical_features),
                 'total_chunks_processed': self.total_chunks,
                 'total_rows_processed': self.total_rows
             },
@@ -379,6 +525,17 @@ class FeatureQualityAnalyzer:
                 'negative_correlation_features': len(correlation_issues['negative_correlation'])
             }
         }
+        
+        # 범주형 분석 결과 추가
+        if categorical_issues:
+            results['categorical_issues'] = dict(categorical_issues)
+            results['categorical_analysis'] = categorical_analysis
+            results['summary'].update({
+                'low_ctr_variance_categorical': len(categorical_issues['low_variance']),
+                'dominant_category_categorical': len(categorical_issues['dominant_category']),
+                'few_categories_categorical': len(categorical_issues['few_categories']),
+                'low_anova_f_categorical': len(categorical_issues['low_anova_f'])
+            })
         
         # JSON으로 저장
         with open(RESULTS_DIR / 'feature_quality_analysis.json', 'w', encoding='utf-8') as f:
@@ -400,11 +557,17 @@ class FeatureQualityAnalyzer:
         # 상관관계 품질 분석
         correlation_issues, correlations = self.analyze_correlation_quality()
         
+        # 범주형 피처 품질 분석
+        categorical_issues = None
+        categorical_analysis = None
+        if self.categorical_features:
+            categorical_issues, categorical_analysis = self.analyze_categorical_quality()
+        
         # 시각화 생성
-        self.create_visualizations(distribution_issues, correlation_issues, correlations)
+        self.create_visualizations(distribution_issues, correlation_issues, correlations, categorical_issues)
         
         # 결과 저장
-        self.save_results(distribution_issues, correlation_issues, correlations)
+        self.save_results(distribution_issues, correlation_issues, correlations, categorical_issues, categorical_analysis)
         
         print(f"\n🎉 피처 품질 분석 완료!")
         print(f"📁 결과 파일:")
