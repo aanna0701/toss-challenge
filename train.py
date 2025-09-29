@@ -5,8 +5,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from main import CFG, device, initialize
-from data_loader import load_and_preprocess_data, create_data_loaders
+# from main import CFG, device, initialize
+from data_loader import create_data_loaders
 from model import create_tabular_transformer_model
 from early_stopping import create_early_stopping_from_config
 from metrics import evaluate_model, print_metrics, save_training_logs, get_best_checkpoint_info
@@ -16,7 +16,7 @@ from gradient_norm import (
 )
 
 
-def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
+def train_model(train_df, feature_cols, seq_col, target_col, CFG, device="cuda", results_dir=None):
     """모델 훈련 함수"""
     
     # 1) split
@@ -66,10 +66,13 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     gradient_norm_logs = []
     
     # Checkpoint 저장 디렉토리 생성
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if results_dir is None:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    else:
+        checkpoint_dir = results_dir
     print(f"📁 Checkpoint 디렉토리: {checkpoint_dir}")
 
     # Gradient norm 설정 확인
@@ -161,7 +164,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
         
         # 5 epoch마다 checkpoint 저장
         if epoch % 5 == 0:
-            save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir)
+            save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir, CFG=CFG)
         
         # Early Stopping 체크 (Score 기준)
         monitor_value = val_metrics[CFG['EARLY_STOPPING']['MONITOR'].replace('val_', '')]
@@ -169,7 +172,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
             if early_stopping(monitor_value, model):
                 print(f"🏁 훈련 조기 종료 (Epoch {epoch}/{CFG['EPOCHS']})")
                 # 조기 종료 시에도 checkpoint 저장
-                save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir)
+                save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir, CFG=CFG)
                 break
 
     # 최종 결과 출력
@@ -179,15 +182,26 @@ def train_model(train_df, feature_cols, seq_col, target_col, device="cuda"):
     
     # 최종 checkpoint 저장 (훈련 완료 시)
     print(f"💾 최종 checkpoint 저장 중...")
-    save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir)
+    save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir, CFG=CFG)
+    
+    # Best checkpoint 저장 (최고 성능 가중치)
+    if early_stopping and early_stopping.get_best_weights() is not None:
+        print(f"🏆 Best checkpoint 저장 중...")
+        best_checkpoint_path = os.path.join(checkpoint_dir, "best.pth")
+        torch.save(early_stopping.get_best_weights(), best_checkpoint_path)
+        print(f"✅ Best checkpoint 저장 완료: {best_checkpoint_path}")
+        print(f"   • Best {CFG['EARLY_STOPPING']['MONITOR']}: {early_stopping.get_best_score():.6f}")
+    else:
+        print(f"⚠️  Best checkpoint 저장 건너뜀 (Early Stopping 비활성화 또는 가중치 없음)")
 
     # 훈련 로그 저장
     if CFG['METRICS']['SAVE_LOGS']:
-        # RESULTS_DIR에서 {datetime}을 실제 타임스탬프로 치환
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
-        os.makedirs(results_dir, exist_ok=True)
+        # results_dir가 제공되지 않으면 기본 경로 사용
+        if results_dir is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
+            os.makedirs(results_dir, exist_ok=True)
         log_filepath = results_dir + "/" + CFG['METRICS']['LOG_FILE']
         save_training_logs(training_logs, log_filepath)
         
@@ -217,7 +231,7 @@ def save_model(model, path="model.pth"):
     torch.save(model.state_dict(), path)
     print(f"Model saved to {path}")
 
-def save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir):
+def save_checkpoint(model, epoch, optimizer, train_loss, val_metrics, checkpoint_dir, CFG):
     """Checkpoint 저장 함수"""
     checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pth")
     
@@ -254,23 +268,3 @@ def load_model(model, path="model.pth"):
     model.load_state_dict(torch.load(path, weights_only=True))
     print(f"Model loaded from {path}")
     return model
-
-if __name__ == "__main__":
-    # 초기화 (YAML 설정 파일 로드 포함)
-    initialize()
-    
-    # 데이터 로드 및 전처리
-    train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data()
-    
-    # 모델 훈련
-    model = train_model(
-        train_df=train_data,
-        feature_cols=feature_cols,
-        seq_col=seq_col,
-        target_col=target_col,
-        device=device
-    )
-    
-    # 모델 저장
-    save_model(model, CFG['PATHS']['MODEL_SAVE'])
-    print("Training completed!")

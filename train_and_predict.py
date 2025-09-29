@@ -15,19 +15,26 @@ import yaml
 with open('config.yaml', 'r', encoding='utf-8') as f:
     CFG = yaml.safe_load(f)
 
-from main import device
-from utils import seed_everything
+from utils import seed_everything, get_device
 from data_loader import load_and_preprocess_data
 from model import *
 from train import train_model, save_model
 from predict import predict_test_data
 
+DEVICE = get_device()
 
 def create_results_directory():
     """결과 저장 디렉토리 생성"""
     # {datetime}을 실제 타임스탬프로 치환
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
+    
+    # 기존 results 디렉토리가 있으면 삭제하고 새로 생성
+    if os.path.exists(results_dir):
+        import shutil
+        shutil.rmtree(results_dir)
+        print(f"🗑️  기존 결과 디렉토리 삭제: {results_dir}")
+    
     os.makedirs(results_dir, exist_ok=True)
     print(f"📁 결과 디렉토리 생성: {results_dir}")
     return results_dir
@@ -152,7 +159,7 @@ def cleanup_temp_files(temp_model_path):
         print(f"⚠️  임시 웨이트 파일이 존재하지 않음: {temp_model_path}")
 
 
-def save_results_with_metadata(results_dir, submission_df, model_info):
+def save_results_with_metadata(results_dir, submission_df, model_info, model_path=None):
     """결과와 메타데이터를 함께 저장"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
@@ -167,6 +174,8 @@ def save_results_with_metadata(results_dir, submission_df, model_info):
         'model_info': model_info,
         'config': CFG,
         'submission_shape': submission_df.shape,
+        'model_used': "Best Checkpoint" if model_path and "best.pth" in model_path else "Temp Model",
+        'model_path': model_path,
         'submission_stats': {
             'mean_prediction': float(submission_df['clicked'].mean()),
             'min_prediction': float(submission_df['clicked'].min()),
@@ -219,9 +228,9 @@ def main():
     print_progress(1, total_steps, "시스템 초기화")
     # 시드 고정
     seed_everything(CFG['SEED'])
-    print(f"Device: {device}")
+    print(f"Device: {DEVICE}")
     print_step_summary("초기화", {
-        "Device": device,
+        "Device": DEVICE,
         "Epochs": CFG['EPOCHS'],
         "Batch Size": CFG['BATCH_SIZE'],
         "Learning Rate": CFG['LEARNING_RATE'],
@@ -251,7 +260,12 @@ def main():
         print(f"💾 초기 메모리 사용량: {get_memory_usage():.1f} MB")
         
         # 전체 데이터 로드 (훈련 시 클래스 불균형 해결을 위한 다운샘플링 적용)
-        train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data()
+        print("📊 데이터 로딩 시작...")
+        print("   • 훈련 데이터: ./train.parquet")
+        print("   • 테스트 데이터: ./test.parquet")
+        print("   • 클래스 불균형 해결: 다운샘플링 적용")
+        
+        train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data(CFG)
         print(f"💾 데이터 로드 후 메모리 사용량: {get_memory_usage():.1f} MB")
         
         print_step_summary("데이터 로드", {
@@ -280,19 +294,29 @@ def main():
             feature_cols=feature_cols,
             seq_col=seq_col,
             target_col=target_col,
-            device=device
+            CFG=CFG,
+            device=DEVICE,
+            results_dir=results_dir
         )
         print_step_summary("모델 훈련", {
             "Model Type": "TabularTransformer",
             "Epochs Completed": CFG['EPOCHS'],
-            "Device Used": device,
+            "Device Used": DEVICE,
             "Checkpoint Interval": "Every 5 epochs"
         })
         
         # 6. 임시 웨이트 파일 저장
         print_progress(5, total_steps, "임시 웨이트 파일 저장")
         save_model(model, temp_model_path)
-        print_step_summary("웨이트 저장", {"File Path": temp_model_path})
+        
+        # Best checkpoint 경로 설정
+        best_model_path = os.path.join(results_dir, "best.pth")
+        print(f"🏆 Best checkpoint 경로: {best_model_path}")
+        
+        print_step_summary("웨이트 저장", {
+            "Temp Model": temp_model_path,
+            "Best Model": best_model_path
+        })
         
         # 6.5. 훈련 데이터 메모리에서 제거
         print_progress(6, total_steps, "훈련 데이터 메모리 정리")
@@ -346,12 +370,17 @@ def main():
         print(f"   • Batch Size: {CFG['BATCH_SIZE']}")
         print(f"💾 예측 전 메모리 사용량: {get_memory_usage():.1f} MB")
         
+        # Best checkpoint가 있으면 사용, 없으면 임시 모델 사용
+        model_path_for_prediction = best_model_path if os.path.exists(best_model_path) else temp_model_path
+        print(f"🔮 예측에 사용할 모델: {model_path_for_prediction}")
+        
         submission_df = predict_test_data(
             test_data=test_data,
             feature_cols=feature_cols,
             seq_col=seq_col,
-            model_path=temp_model_path,
-            device=device
+            CFG=CFG,
+            model_path=model_path_for_prediction,
+            device=DEVICE
         )
         print(f"💾 예측 후 메모리 사용량: {get_memory_usage():.1f} MB")
         
@@ -360,13 +389,14 @@ def main():
             "Mean Prediction": f"{submission_df['clicked'].mean():.4f}",
             "Min Prediction": f"{submission_df['clicked'].min():.4f}",
             "Max Prediction": f"{submission_df['clicked'].max():.4f}",
+            "Model Used": "Best Checkpoint" if "best.pth" in model_path_for_prediction else "Temp Model",
             "Memory Usage": f"{get_memory_usage():.1f} MB"
         })
         
         # 9. 결과 저장
         print_progress(9, total_steps, "결과 및 메타데이터 저장")
         submission_path, metadata_path = save_results_with_metadata(
-            results_dir, submission_df, model_info
+            results_dir, submission_df, model_info, model_path_for_prediction
         )
         print_step_summary("결과 저장", {
             "Submission File": submission_path,
@@ -385,9 +415,11 @@ def main():
         
     except Exception as e:
         print(f"\n❌ 오류 발생: {e}")
+        print(f"🔍 오류 유형: {type(e).__name__}")
+        print(f"💾 오류 발생 시 메모리 사용량: {get_memory_usage():.1f} MB")
         
         # 에러 로깅
-        step_info = f"워크플로우 실행 중 오류 발생"
+        step_info = f"워크플로우 실행 중 오류 발생 - {type(e).__name__}"
         log_error(e, error_log_path, step_info)
         
         # 에러 요약 저장
@@ -396,6 +428,7 @@ def main():
         print(f"🔍 상세 오류:")
         traceback.print_exc()
         print(f"\n📋 에러 로그 파일 위치: {error_log_path}")
+        print(f"📁 결과 디렉토리: {results_dir}")
         raise
     
     finally:

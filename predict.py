@@ -3,7 +3,6 @@ import torch
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-from main import CFG, device, initialize
 from data_loader import load_and_preprocess_data, ClickDataset, collate_fn_transformer_infer, FeatureProcessor
 from model import *
 
@@ -46,7 +45,7 @@ def predict(model, test_loader, device="cuda"):
     
     return result
 
-def create_submission(prediction_result, output_path=None):
+def create_submission(prediction_result, CFG, output_path=None):
     """제출 파일 생성 함수 - 딕셔너리 형태의 예측 결과를 받음"""
     if output_path is None:
         output_path = CFG['PATHS']['SUBMISSION']
@@ -73,17 +72,32 @@ def create_submission(prediction_result, output_path=None):
     print(f"Submission shape: {submit.shape}")
     return submit
 
-def load_trained_model(feature_cols, model_path=None, device="cuda"):
+def load_trained_model(feature_cols, CFG, model_path=None, device="cuda"):
     """훈련된 모델 로드 함수"""
-    if model_path is None:
-        model_path = CFG['PATHS']['MODEL_SAVE']
-    
-    # TabularTransformer 모델용 피처 정보 (훈련 시와 동일한 FeatureProcessor 필요)
-    # 실제로는 훈련 시 저장된 feature_processor 정보를 로드해야 함
-    # 여기서는 간단히 config에서 가져옴
-    categorical_cardinalities = [2, 8, 20, 7, 24]  # gender, age_group, inventory_id, day_of_week, hour
-    num_categorical_features = len(CFG['MODEL']['FEATURES']['CATEGORICAL'])
-    num_numerical_features = len(feature_cols) - num_categorical_features - 1  # seq 제외
+    try:
+        if model_path is None:
+            model_path = CFG['PATHS']['MODEL_SAVE']
+        
+        print(f"🔧 모델 로딩 시작...")
+        print(f"   • 모델 경로: {model_path}")
+        print(f"   • 피처 개수: {len(feature_cols)}")
+        print(f"   • 디바이스: {device}")
+        
+        # TabularTransformer 모델용 피처 정보 (훈련 시와 동일한 FeatureProcessor 필요)
+        # 실제로는 훈련 시 저장된 feature_processor 정보를 로드해야 함
+        # 여기서는 간단히 config에서 가져옴
+        categorical_cardinalities = [2, 8, 20, 7, 24]  # gender, age_group, inventory_id, day_of_week, hour
+        num_categorical_features = len(CFG['MODEL']['FEATURES']['CATEGORICAL'])
+        num_numerical_features = len(feature_cols) - num_categorical_features - 1  # seq 제외
+        
+        print(f"   • 범주형 피처: {num_categorical_features}개")
+        print(f"   • 수치형 피처: {num_numerical_features}개")
+        print(f"   • 범주형 카디널리티: {categorical_cardinalities}")
+        
+    except KeyError as e:
+        raise KeyError(f"❌ 설정 파일에서 필요한 키를 찾을 수 없습니다: {e}")
+    except Exception as e:
+        raise Exception(f"❌ 모델 로딩 준비 중 오류 발생: {e}")
     
     model = create_tabular_transformer_model(
         num_categorical_features=num_categorical_features,
@@ -101,7 +115,14 @@ def load_trained_model(feature_cols, model_path=None, device="cuda"):
     )
     
     model.load_state_dict(torch.load(model_path, weights_only=True))
-    print(f"Model loaded from {model_path}")
+    print(f"✅ 모델 로딩 완료: {model_path}")
+    
+    # Best checkpoint인지 확인
+    if "best.pth" in model_path:
+        print(f"🏆 Best checkpoint 사용 중 (최고 성능 모델)")
+    else:
+        print(f"📝 일반 checkpoint 사용 중")
+    
     return model
 
 def run_inference(model, test_data, feature_cols, seq_col, batch_size, device="cuda"):
@@ -117,41 +138,10 @@ def run_inference(model, test_data, feature_cols, seq_col, batch_size, device="c
     
     return prediction_result
 
-if __name__ == "__main__":
-    # 초기화
-    initialize()
-    
-    # 데이터 로드
-    _, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data()
-    
-    # 훈련된 모델 로드 (train.py에서 저장된 모델)
-    try:
-        model = load_trained_model(feature_cols, device=device)
-    except FileNotFoundError:
-        print("Trained model not found. Please run train.py first!")
-        exit(1)
-    
-    # 추론 실행
-    prediction_result = run_inference(
-        model=model,
-        test_data=test_data,
-        feature_cols=feature_cols,
-        seq_col=seq_col,
-        batch_size=CFG['BATCH_SIZE'],
-        device=device
-    )
-    
-    # 제출 파일 생성
-    submission = create_submission(prediction_result)
-    predictions = prediction_result['predictions']
-    print("Prediction completed!")
-    print(f"Prediction shape: {predictions.shape}")
-    print(f"Prediction stats: min={predictions.min():.4f}, max={predictions.max():.4f}, mean={predictions.mean():.4f}")
 
-
-def predict_test_data(test_data, feature_cols, seq_col, model_path=None, device="cuda"):
+def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path=None, device="cuda"):
     # 모델 로드
-    model = load_trained_model(feature_cols, model_path, device)
+    model = load_trained_model(feature_cols, CFG, model_path, device)
     
     # 예측 수행
     prediction_result = run_inference(
@@ -164,7 +154,7 @@ def predict_test_data(test_data, feature_cols, seq_col, model_path=None, device=
     )
     
     # 제출 파일 생성
-    submission = create_submission(prediction_result)
+    submission = create_submission(prediction_result, CFG=CFG)
     
     predictions = prediction_result['predictions']
     print(f"✅ 예측 완료!")

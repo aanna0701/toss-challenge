@@ -301,10 +301,8 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
     
     return train_loader, val_loader, test_loader, train_dataset, val_dataset, feature_processor
 
-def load_and_preprocess_data():
+def load_and_preprocess_data(CFG):
     """데이터 로드 및 전처리 함수"""
-    from main import CFG
-    
     def safe_load_parquet(file_path):
         """안전한 parquet 로드 함수 - 항상 전체 데이터 로드"""
         print(f"📊 전체 데이터 로드 - {file_path}")
