@@ -13,8 +13,10 @@ from datetime import datetime
 import os
 import gc
 import pyarrow.parquet as pq
+import argparse
+import psutil
 
-def create_classified_parquet_files():
+def create_classified_parquet_files(chunk_size=1000000):
     """분류된 데이터를 별도 parquet 파일로 저장 (즉시 저장 방식)"""
     print("📊 분류된 데이터 파일 생성/확인 중...")
     
@@ -22,25 +24,11 @@ def create_classified_parquet_files():
     clicked_1_file = 'data/clicked_1_data.parquet'
     clicked_0_file = 'data/clicked_0_data.parquet'
     
-    # 기존 파일이 있으면 로드
-    if os.path.exists(missing_file) and os.path.exists(clicked_1_file) and os.path.exists(clicked_0_file):
-        print("  ✅ 기존 분류 파일 발견, 로드 중...")
-        missing_data = pd.read_parquet(missing_file, engine='pyarrow')
-        clicked_1_data = pd.read_parquet(clicked_1_file, engine='pyarrow')
-        clicked_0_data = pd.read_parquet(clicked_0_file, engine='pyarrow')
-        
-        print(f"  데이터 분포:")
-        print(f"    - feat_e_3 missing: {len(missing_data):,}개")
-        print(f"    - feat_e_3 available + clicked=1: {len(clicked_1_data):,}개")
-        print(f"    - feat_e_3 available + clicked=0: {len(clicked_0_data):,}개")
-        
-        return missing_data, clicked_1_data, clicked_0_data
-    
     # 기존 파일이 없으면 생성
     print("  📝 새로운 분류 파일 생성 중...")
+    print(f"  🔧 사용할 chunk_size: {chunk_size:,} 행")
     
-    # 청크 단위로 처리하여 즉시 저장
-    chunk_size = 10000  # 1만개씩 처리
+    # 청크 단위로 처리하여 즉시 저장 
     parquet_file = pq.ParquetFile('./data/train.parquet')
     total_rows = parquet_file.metadata.num_rows
     print(f"  전체 데이터: {total_rows:,}개 행")
@@ -58,8 +46,14 @@ def create_classified_parquet_files():
     
     for batch in parquet_file.iter_batches(batch_size=chunk_size):
         chunk = batch.to_pandas()
+        print(f"  📦 청크 {batch_count + 1} 로드 완료: {len(chunk):,}개 행")
+        
+        # 메모리 상황 출력
+        memory_info = psutil.virtual_memory()
+        print(f"    💾 메모리 사용량: {memory_info.percent:.1f}% ({memory_info.used/(1024**3):.1f}GB / {memory_info.total/(1024**3):.1f}GB)")
         
         # 1. feat_e_3 missing 데이터 처리
+        print(f"    🔍 feat_e_3 missing 데이터 분류 중...")
         missing_chunk = chunk[chunk['feat_e_3'].isna()]
         if len(missing_chunk) > 0:
             if first_batch:
@@ -71,8 +65,18 @@ def create_classified_parquet_files():
                 combined.to_parquet(missing_file, engine='pyarrow', compression='snappy', index=False)
                 del existing, combined
             missing_count += len(missing_chunk)
+            print(f"      ✅ missing 데이터 저장: {len(missing_chunk):,}개")
+            
+            # missing 데이터 저장 후 메모리 사용량 출력
+            memory_info = psutil.virtual_memory()
+            print(f"      💾 missing 저장 후 메모리: {memory_info.percent:.1f}% ({memory_info.used/(1024**3):.1f}GB)")
+        
+        # missing_chunk 메모리 해제
+        del missing_chunk
+        gc.collect()
         
         # 2. feat_e_3 available + clicked=1 데이터 처리
+        print(f"    🔍 feat_e_3 available + clicked=1 데이터 분류 중...")
         clicked_1_chunk = chunk[(chunk['feat_e_3'].notna()) & (chunk['clicked'] == 1)]
         if len(clicked_1_chunk) > 0:
             if first_batch:
@@ -84,8 +88,18 @@ def create_classified_parquet_files():
                 combined.to_parquet(clicked_1_file, engine='pyarrow', compression='snappy', index=False)
                 del existing, combined
             clicked_1_count += len(clicked_1_chunk)
+            print(f"      ✅ clicked=1 데이터 저장: {len(clicked_1_chunk):,}개")
+            
+            # clicked=1 데이터 저장 후 메모리 사용량 출력
+            memory_info = psutil.virtual_memory()
+            print(f"      💾 clicked=1 저장 후 메모리: {memory_info.percent:.1f}% ({memory_info.used/(1024**3):.1f}GB)")
+        
+        # clicked_1_chunk 메모리 해제
+        del clicked_1_chunk
+        gc.collect()
         
         # 3. feat_e_3 available + clicked=0 데이터 처리
+        print(f"    🔍 feat_e_3 available + clicked=0 데이터 분류 중...")
         clicked_0_chunk = chunk[(chunk['feat_e_3'].notna()) & (chunk['clicked'] == 0)]
         if len(clicked_0_chunk) > 0:
             if first_batch:
@@ -97,18 +111,31 @@ def create_classified_parquet_files():
                 combined.to_parquet(clicked_0_file, engine='pyarrow', compression='snappy', index=False)
                 del existing, combined
             clicked_0_count += len(clicked_0_chunk)
+            print(f"      ✅ clicked=0 데이터 저장: {len(clicked_0_chunk):,}개")
+            
+            # clicked=0 데이터 저장 후 메모리 사용량 출력
+            memory_info = psutil.virtual_memory()
+            print(f"      💾 clicked=0 저장 후 메모리: {memory_info.percent:.1f}% ({memory_info.used/(1024**3):.1f}GB)")
         
-        # 메모리 정리
-        del chunk, missing_chunk, clicked_1_chunk, clicked_0_chunk
+        # clicked_0_chunk 메모리 해제
+        del clicked_0_chunk
+        gc.collect()
+        
+        # 원본 chunk 메모리 해제
+        del chunk
         gc.collect()
         
         first_batch = False
         batch_count += 1
         
-        # 진행상황 출력 (매우 자주)
-        if batch_count % 10 == 0:
-            processed = batch_count * chunk_size
-            print(f"    처리 진행: {processed:,}개 / {total_rows:,}개 ({processed/total_rows*100:.1f}%)")
+        # 모든 청크에 대해 진행상황 출력
+        processed = batch_count * chunk_size
+        print(f"    📊 처리 진행: {processed:,}개 / {total_rows:,}개 ({processed/total_rows*100:.1f}%)")
+        
+        # 메모리 정리 후 메모리 상황 출력
+        memory_info = psutil.virtual_memory()
+        print(f"    💾 메모리 정리 후: {memory_info.percent:.1f}% ({memory_info.used/(1024**3):.1f}GB / {memory_info.total/(1024**3):.1f}GB)")
+        print("    " + "="*50)
     
     print(f"  데이터 분포:")
     print(f"    - feat_e_3 missing: {missing_count:,}개")
@@ -134,14 +161,14 @@ def create_classified_parquet_files():
     
     return missing_data, clicked_1_data, clicked_0_data
 
-def create_fold_parquet_files():
+def create_fold_parquet_files(chunk_size=1000000):
     """각 fold별로 별도 parquet 파일 생성 (메모리 효율적)"""
     print("🚀 Fold별 parquet 파일 생성 시작")
     print("=" * 60)
     print(f"📅 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # 1. 분류된 데이터 로드/생성
-    missing_data, clicked_1_data, clicked_0_data = create_classified_parquet_files()
+    missing_data, clicked_1_data, clicked_0_data = create_classified_parquet_files(chunk_size)
     
     # 2. clicked=0 데이터를 10-fold로 분할
     print("🔄 clicked=0 데이터를 10-fold로 분할 중...")
@@ -273,13 +300,19 @@ if __name__ == "__main__":
 
 def main():
     """메인 함수"""
+    parser = argparse.ArgumentParser(description='10-fold 데이터셋 분할')
+    parser.add_argument('--chunk_size', type=int, default=1000000,
+                       help='처리할 청크 크기 (기본값: 1000000)')
+    args = parser.parse_args()
+    
     print("🚀 데이터셋 10-fold 분할 시작")
     print("=" * 60)
     print(f"📅 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔧 설정된 chunk_size: {args.chunk_size:,} 행")
     
     try:
         # Fold별 parquet 파일 생성
-        fold_counts = create_fold_parquet_files()
+        fold_counts = create_fold_parquet_files(args.chunk_size)
         
         print(f"\n🎉 모든 작업 완료!")
         print(f"📅 완료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
