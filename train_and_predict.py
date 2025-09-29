@@ -8,12 +8,31 @@ import gc
 import psutil
 import traceback
 import logging
+import argparse
 from datetime import datetime
 import yaml
 
-# config_debug.yaml 로드
-with open('config.yaml', 'r', encoding='utf-8') as f:
-    CFG = yaml.safe_load(f)
+def parse_args():
+    """명령행 인수 파싱"""
+    parser = argparse.ArgumentParser(description='훈련 및 예측 워크플로우 실행')
+    parser.add_argument('--config', type=str, required=True,
+                       help='설정 파일 경로 (필수)')
+    return parser.parse_args()
+
+def load_config(config_path):
+    """설정 파일 로드"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"❌ 설정 파일을 찾을 수 없습니다: {config_path}")
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    print(f"📋 설정 파일 로드: {config_path}")
+    return config
+
+# 명령행 인수 파싱 및 설정 로드
+args = parse_args()
+CFG = load_config(args.config)
 
 from utils import seed_everything, get_device
 from data_loader import load_and_preprocess_data
@@ -25,9 +44,18 @@ DEVICE = get_device()
 
 def create_results_directory():
     """결과 저장 디렉토리 생성"""
-    # {datetime}을 실제 타임스탬프로 치환
+    # 훈련 데이터 경로에서 fold 정보 추출
+    train_data_path = CFG['PATHS']['TRAIN_DATA']
+    
+    # train_fold1.parquet -> fold1, train_fold2.parquet -> fold2
+    if 'train_fold' in train_data_path:
+        fold_match = os.path.basename(train_data_path).replace('train_fold', '').replace('.parquet', '')
+        folder_name = f"fold{fold_match}"
+    else:
+        folder_name = "full_data"
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
+    results_dir = f"{folder_name}_{timestamp}"
     
     # 기존 results 디렉토리가 있으면 삭제하고 새로 생성
     if os.path.exists(results_dir):
@@ -222,6 +250,7 @@ def main():
     print("🚀 훈련 → 예측 → 결과 저장 워크플로우 시작")
     print("=" * 80)
     print(f"📅 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📋 설정 파일: {args.config}")
     print(f"🔧 총 단계: {total_steps}단계")
     
     # 1. 초기화
@@ -229,12 +258,17 @@ def main():
     # 시드 고정
     seed_everything(CFG['SEED'])
     print(f"Device: {DEVICE}")
+    
+    # 초기화 요약 정보 설정
+    data_loading_info = f"데이터: {CFG['PATHS']['TRAIN_DATA']}"
+    
     print_step_summary("초기화", {
         "Device": DEVICE,
         "Epochs": CFG['EPOCHS'],
         "Batch Size": CFG['BATCH_SIZE'],
         "Learning Rate": CFG['LEARNING_RATE'],
-        "Data Loading": "전체 데이터 사용"
+        "Weight Decay": CFG['WEIGHT_DECAY'],
+        "Data Loading": data_loading_info
     })
     
     # 2. 결과 디렉토리 생성
@@ -251,7 +285,7 @@ def main():
     
     # 3. 임시 웨이트 파일 경로 설정
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_model_path = CFG['PATHS']['TEMP_MODEL'].replace('{datetime}', timestamp)
+    temp_model_path = f"temp_model_{timestamp}.pth"
     print(f"📝 임시 웨이트 파일 경로: {temp_model_path}")
     
     try:
@@ -259,14 +293,16 @@ def main():
         print_progress(3, total_steps, "데이터 로드 및 전처리")
         print(f"💾 초기 메모리 사용량: {get_memory_usage():.1f} MB")
         
-        # 전체 데이터 로드 (훈련 시 클래스 불균형 해결을 위한 다운샘플링 적용)
+        # 데이터 로드
         print("📊 데이터 로딩 시작...")
-        print("   • 훈련 데이터: ./train.parquet")
-        print("   • 테스트 데이터: ./test.parquet")
-        print("   • 클래스 불균형 해결: 다운샘플링 적용")
+        print(f"   • 훈련 데이터: {CFG['PATHS']['TRAIN_DATA']}")
+        print(f"   • 테스트 데이터: ./test.parquet")
         
         train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data(CFG)
         print(f"💾 데이터 로드 후 메모리 사용량: {get_memory_usage():.1f} MB")
+        
+        # 데이터 로딩 정보 설정
+        data_loading_info = f"데이터: {CFG['PATHS']['TRAIN_DATA']}"
         
         print_step_summary("데이터 로드", {
             "Train Shape": train_data.shape,
@@ -275,8 +311,7 @@ def main():
             "Sequence Column": seq_col,
             "Target Column": target_col,
             "Test ID Column": "ID" in test_data.columns,
-            "Data Loading": "전체 데이터 사용",
-            "Class Balancing": "다운샘플링 적용",
+            "Data Loading": data_loading_info,
             "Memory Usage": f"{get_memory_usage():.1f} MB"
         })
         
@@ -348,6 +383,7 @@ def main():
             'lstm_hidden': CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN'],
             'epochs': CFG['EPOCHS'],
             'learning_rate': CFG['LEARNING_RATE'],
+            'weight_decay': CFG['WEIGHT_DECAY'],
             'batch_size': CFG['BATCH_SIZE'],
             'train_shape': model_info_data['train_shape'],
             'test_shape': model_info_data['test_shape'],

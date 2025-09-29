@@ -15,7 +15,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def load_config(config_path="config.yaml", base_config=None):
+def load_config(config_path, base_config=None):
     """YAML 설정 파일을 읽어서 기본 설정을 업데이트하는 함수"""
     if base_config is None:
         raise ValueError("base_config must be provided")

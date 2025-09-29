@@ -125,10 +125,10 @@ def load_trained_model(feature_cols, CFG, model_path=None, device="cuda"):
     
     return model
 
-def run_inference(model, test_data, feature_cols, seq_col, batch_size, device="cuda"):
+def run_inference(model, test_data, feature_cols, seq_col, batch_size, CFG, device="cuda"):
     """추론 실행 함수"""
     # TabularTransformer 모델용 데이터셋
-    feature_processor = FeatureProcessor()
+    feature_processor = FeatureProcessor(CFG)
     feature_processor.fit(test_data)  # 테스트 데이터로 fit (실제로는 훈련 데이터로 fit해야 함)
     test_dataset = ClickDataset(test_data, feature_processor, has_target=False, has_id=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
@@ -150,6 +150,7 @@ def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path=None, de
         feature_cols=feature_cols,
         seq_col=seq_col,
         batch_size=CFG['BATCH_SIZE'],
+        CFG=CFG,
         device=device
     )
     

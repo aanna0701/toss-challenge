@@ -6,12 +6,26 @@ STUDIO_NAME="fun-tan-2pfe"
 TEAMSPACE="TOSS-challenge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"/toss
 
+# Config 파일 설정 (반드시 지정해야 함)
+if [ -z "${CONFIG_FILE:-}" ]; then
+    echo "❌ CONFIG_FILE 환경변수가 설정되지 않았습니다!"
+    echo ""
+    echo "사용법:"
+    echo "  CONFIG_FILE=config_fold1.yaml ./run_training.sh"
+    echo "  CONFIG_FILE=config_fold2.yaml ./run_training.sh"
+    echo ""
+    echo "사용 가능한 config 파일들:"
+    ls -1 *.yaml 2>/dev/null | sed 's/^/  - /' || echo "  (config 파일이 없습니다)"
+    exit 1
+fi
+
 echo "🚀 훈련 워크플로우 시작"
 echo "=================================="
 echo "📅 시작 시간: $(date)"
 echo "🏢 Studio: $STUDIO_NAME"
 echo "👥 Teamspace: $TEAMSPACE"
 echo "📁 작업 디렉토리: $SCRIPT_DIR"
+echo "📋 설정 파일: $CONFIG_FILE"
 echo ""
 
 # 작업 디렉토리로 이동
@@ -29,8 +43,8 @@ if [ ! -f "train_and_predict.py" ]; then
     exit 1
 fi
 
-if [ ! -f "config.yaml" ]; then
-    echo "❌ config.yaml 파일이 없습니다!"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ 설정 파일이 없습니다: $CONFIG_FILE"
     exit 1
 fi
 
@@ -42,7 +56,7 @@ echo "🏋️ 훈련 워크플로우 실행 중..."
 echo "=================================="
 
 # 훈련 실행 (오류 발생 시에도 계속 진행)
-if python train_and_predict.py; then
+if python train_and_predict.py --config "$CONFIG_FILE"; then
     echo ""
     echo "✅ 훈련 워크플로우 성공적으로 완료!"
     TRAINING_STATUS="SUCCESS"

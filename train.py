@@ -24,7 +24,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device="cuda",
 
     # 2) Dataset / Loader
     train_loader, val_loader, _, train_dataset, val_dataset, feature_processor = create_data_loaders(
-        tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE']
+        tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE'], CFG
     )
 
     # 3) TabularTransformer 모델 생성
@@ -48,7 +48,32 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device="cuda",
     )
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=CFG['LEARNING_RATE'])
+
+    # Weight decay 적용 (특정 파라미터 제외)
+    weight_decay_params = []
+    no_decay_params = []
+
+    no_decay_keys = ['class_token', 'column_embeddings', 'nan_token', 'bias', 'norm', 'ln', 'embedding']
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        lname = name.lower()
+        if any(k in lname for k in no_decay_keys):
+            no_decay_params.append(param)
+        else:
+            weight_decay_params.append(param)
+
+    optimizer = torch.optim.AdamW([
+        {'params': weight_decay_params, 'weight_decay': CFG['WEIGHT_DECAY']},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ], lr=CFG['LEARNING_RATE'])
+    
+    print(f"🔧 Optimizer 설정:")
+    print(f"   • Learning Rate: {CFG['LEARNING_RATE']}")
+    print(f"   • Weight Decay: {CFG['WEIGHT_DECAY']}")
+    print(f"   • Weight Decay 적용 파라미터: {len(weight_decay_params)}개")
+    print(f"   • Weight Decay 제외 파라미터: {len(no_decay_params)}개")
 
     # Early Stopping 설정
     early_stopping = create_early_stopping_from_config(CFG)

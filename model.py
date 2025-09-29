@@ -1,48 +1,71 @@
 import torch
 import torch.nn as nn
 
-__all__ = [
-    "create_tabular_transformer_model"
-    ]
+__all__ = ["create_tabular_transformer_model"]
 
+
+def _set_dropouts_on_encoder_layer(layer: nn.TransformerEncoderLayer,
+                                   attn_p: float,
+                                   ffn_p: float,
+                                   residual_p: float):
+    """
+    PyTorch 버전 차이를 고려해 안전하게 드롭아웃을 설정.
+    - self_attn 드롭아웃
+    - FFN 드롭아웃 (dropout1)
+    - Residual 경로 드롭아웃 (dropout2 또는 dropout)
+    """
+    # 어텐션 드롭아웃
+    if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "dropout"):
+        layer.self_attn.dropout = nn.Dropout(p=attn_p)
+
+    # PyTorch 2.x: dropout1, dropout2 존재
+    if hasattr(layer, "dropout1"):
+        layer.dropout1.p = ffn_p
+    if hasattr(layer, "dropout2"):
+        layer.dropout2.p = residual_p
+
+    # 예전 버전 호환: 단일 dropout 필드가 있을 수 있음
+    if hasattr(layer, "dropout") and not hasattr(layer, "dropout2"):
+        layer.dropout.p = residual_p
 
 
 class TabularTransformerModel(nn.Module):
-    def __init__(self, 
-                 num_categorical_features=0, 
-                 categorical_cardinalities=None,
-                 num_numerical_features=0,
-                 lstm_hidden=32,
-                 hidden_dim=192,
-                 n_heads=8,
-                 n_layers=3,
-                 ffn_size_factor=4/3,
-                 attention_dropout=0.2,
-                 ffn_dropout=0.1,
-                 residual_dropout=0.0,
-                 device="cuda"):
+    def __init__(
+        self,
+        num_categorical_features=0,
+        categorical_cardinalities=None,  # 각 피처마다 +1(OOV/미싱) 까지 포함된 값이어야 함
+        num_numerical_features=0,
+        lstm_hidden=32,
+        hidden_dim=192,
+        n_heads=8,
+        n_layers=3,
+        ffn_size_factor=4/3,
+        attention_dropout=0.2,
+        ffn_dropout=0.1,
+        residual_dropout=0.0,
+        device="cuda",
+    ):
         super().__init__()
-        
+
         self.num_categorical_features = num_categorical_features
         self.num_numerical_features = num_numerical_features
         self.hidden_dim = hidden_dim
         self.device = device
-        
-        # Categorical embeddings
+
+        # Categorical embeddings (+1 인덱스 체계 전제; 0은 OOV/미싱 예약)
         if num_categorical_features > 0 and categorical_cardinalities is not None:
+            assert len(categorical_cardinalities) == num_categorical_features, \
+                "categorical_cardinalities 길이가 num_categorical_features와 일치해야 합니다."
             self.categorical_embeddings = nn.ModuleList([
-                nn.Embedding(cardinality, hidden_dim) 
+                nn.Embedding(cardinality, hidden_dim)  # cardinality는 +1이 반영된 값이어야 함
                 for cardinality in categorical_cardinalities
             ])
         else:
             self.categorical_embeddings = None
-            
-        # Numerical feature projection
-        if num_numerical_features > 0:
-            self.numerical_projection = nn.Linear(1, hidden_dim)
-        else:
-            self.numerical_projection = None
-            
+
+        # Numerical feature projection (각 수치 1→hidden)
+        self.numerical_projection = nn.Linear(1, hidden_dim) if num_numerical_features > 0 else None
+
         # Sequential features (LSTM)
         if lstm_hidden > 0:
             self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_hidden, batch_first=True)
@@ -50,121 +73,120 @@ class TabularTransformerModel(nn.Module):
         else:
             self.lstm = None
             self.seq_projection = None
-            
-        # Calculate total number of features for column embeddings
+
+        # 총 feature 토큰 수 계산 (cat + num + seq(있으면 1))
         total_features = 0
         if num_categorical_features > 0:
             total_features += num_categorical_features
         if num_numerical_features > 0:
             total_features += num_numerical_features
         if lstm_hidden > 0:
-            total_features += 1  # LSTM output counts as one feature
-            
-        # Column embeddings
-        self.column_embeddings = nn.Parameter(torch.randn(total_features, hidden_dim))
-        
-        # Class token
-        self.class_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
-        
-        # NaN token for missing values
-        self.nan_token = nn.Parameter(torch.randn(1, hidden_dim))
-        
+            total_features += 1  # LSTM 출력 1개 피처로 간주
+
+        # Column(포지션) 임베딩/클래스 토큰/NaN 토큰
+        self.column_embeddings = nn.Parameter(torch.zeros(total_features, hidden_dim))
+        self.class_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.nan_token = nn.Parameter(torch.zeros(1, hidden_dim))
+
         # Transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=n_heads,
             dim_feedforward=int(hidden_dim * ffn_size_factor),
-            dropout=residual_dropout,
+            dropout=residual_dropout,   # residual 경로 기본 드롭아웃
             activation='gelu',
             batch_first=True,
-            norm_first=True
+            norm_first=True,
         )
-        
-        # Custom attention dropout
-        for layer in encoder_layer.self_attn.modules():
-            if isinstance(layer, nn.Dropout):
-                layer.p = attention_dropout
-                
-        # Custom FFN dropout
-        for layer in encoder_layer.linear1.modules():
-            if isinstance(layer, nn.Dropout):
-                layer.p = ffn_dropout
-        for layer in encoder_layer.linear2.modules():
-            if isinstance(layer, nn.Dropout):
-                layer.p = ffn_dropout
-                
+        _set_dropouts_on_encoder_layer(
+            encoder_layer,
+            attn_p=attention_dropout,
+            ffn_p=ffn_dropout,
+            residual_p=residual_dropout
+        )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        
+
         # Output layer
         self.output_layer = nn.Linear(hidden_dim, 1)
-        
+
         # Initialize weights
         self._init_weights()
-        
+
     def _init_weights(self):
-        """Initialize weights with truncated normal distribution"""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.trunc_normal_(module.weight, std=0.02)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Embedding):
-                nn.init.trunc_normal_(module.weight, std=0.02)
-            elif isinstance(module, nn.Parameter):
-                nn.init.trunc_normal_(module, std=0.02)
-                
+        """트렁크 정규분포 초기화 (파라미터 포함)"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+            elif isinstance(m, nn.LSTM):
+                # LSTM 가중치도 가볍게 초기화
+                for name, param in m.named_parameters():
+                    if "weight" in name:
+                        nn.init.trunc_normal_(param, std=0.02)
+                    elif "bias" in name:
+                        nn.init.zeros_(param)
+
+        # 개별 파라미터(모듈이 아님)
+        nn.init.trunc_normal_(self.column_embeddings, std=0.02)
+        nn.init.trunc_normal_(self.class_token, std=0.02)
+        nn.init.trunc_normal_(self.nan_token, std=0.02)
+
     def forward(self, x_categorical=None, x_numerical=None, x_seq=None, seq_lengths=None, nan_mask=None):
         batch_size = None
         features = []
         feature_idx = 0
-        
-        # Process categorical features
-        if self.categorical_embeddings is not None and x_categorical is not None:
+
+        # Categorical features
+        if self.categorical_embeddings is not None and x_categorical is not None and x_categorical.numel() > 0:
             batch_size = x_categorical.size(0)
             for i, embedding in enumerate(self.categorical_embeddings):
-                cat_feature = embedding(x_categorical[:, i])  # (B, hidden_dim)
-                
-                # Handle missing values for categorical features
+                cat_idx = x_categorical[:, i]  # (B,)  0==OOV/미싱 예약
+                cat_feature = embedding(cat_idx)  # (B, hidden_dim)
+
+                # 결측/OOV 마스크: (nan_mask OR idx==0)
                 if nan_mask is not None:
-                    missing_mask = nan_mask[:, feature_idx].bool()  # (B,)
+                    miss_from_mask = nan_mask[:, feature_idx].bool()  # (B,)
+                    miss_from_oov = (cat_idx == 0)
+                    missing_mask = (miss_from_mask | miss_from_oov)
+                else:
+                    missing_mask = (cat_idx == 0)
+
+                if missing_mask.any():
                     cat_feature = torch.where(
-                        missing_mask.unsqueeze(-1),  # (B, 1)
-                        self.nan_token.expand(batch_size, -1),  # (B, hidden_dim)
+                        missing_mask.unsqueeze(-1),
+                        self.nan_token.expand(cat_feature.size(0), -1),
                         cat_feature
                     )
-                
+
                 features.append(cat_feature)
                 feature_idx += 1
-                
-        # Process numerical features
-        if self.numerical_projection is not None and x_numerical is not None:
+
+        # Numerical features
+        if self.numerical_projection is not None and x_numerical is not None and x_numerical.numel() > 0:
             if batch_size is None:
                 batch_size = x_numerical.size(0)
-            
-            # Project all numerical features at once: (B, num_numerical_features, hidden_dim)
-            num_features = self.numerical_projection(x_numerical.unsqueeze(-1)).squeeze(-2)  # (B, num_numerical_features, hidden_dim)
-            
-            # Handle missing values for numerical features
+            # (B, num_numerical_features, hidden_dim)
+            num_features = self.numerical_projection(x_numerical.unsqueeze(-1)).squeeze(-2)
+
+            # 결측치 NaN 토큰 대체
             if nan_mask is not None:
-                # Extract missing masks for all numerical features at once
-                missing_masks = nan_mask[:, feature_idx:feature_idx + self.num_numerical_features].bool()  # (B, num_numerical_features)
-                missing_masks = missing_masks.unsqueeze(-1)  # (B, num_numerical_features, 1)
-                
-                # Replace missing features with NaN token
-                nan_tokens = self.nan_token.expand(batch_size, self.num_numerical_features, -1)  # (B, num_numerical_features, hidden_dim)
-                num_features = torch.where(missing_masks, nan_tokens, num_features)
-            
-            # Add each numerical feature to the features list
+                miss = nan_mask[:, feature_idx:feature_idx + self.num_numerical_features].bool()  # (B, N)
+                miss = miss.unsqueeze(-1)  # (B, N, 1)
+                nan_tokens = self.nan_token.expand(batch_size, self.num_numerical_features, -1)
+                num_features = torch.where(miss, nan_tokens, num_features)
+
             for i in range(self.num_numerical_features):
-                features.append(num_features[:, i, :])  # (B, hidden_dim)
-            
+                features.append(num_features[:, i, :])
+
             feature_idx += self.num_numerical_features
-            
-        # Process sequential features
+
+        # Sequential feature
         if self.lstm is not None and x_seq is not None and seq_lengths is not None:
             if batch_size is None:
                 batch_size = x_seq.size(0)
-            # Process sequence through LSTM
             x_seq = x_seq.unsqueeze(-1)  # (B, L, 1)
             packed = nn.utils.rnn.pack_padded_sequence(
                 x_seq, seq_lengths.cpu(), batch_first=True, enforce_sorted=False
@@ -172,59 +194,55 @@ class TabularTransformerModel(nn.Module):
             _, (h_n, _) = self.lstm(packed)
             h = h_n[-1]  # (B, lstm_hidden)
             seq_feature = self.seq_projection(h)  # (B, hidden_dim)
-            
-            # Handle missing values for sequential features
+
+            # 결측 마스크 적용
             if nan_mask is not None:
-                missing_mask = nan_mask[:, feature_idx].bool()  # (B,)
-                seq_feature = torch.where(
-                    missing_mask.unsqueeze(-1),  # (B, 1)
-                    self.nan_token.expand(batch_size, -1),  # (B, hidden_dim)
-                    seq_feature
-                )
-            
+                missing_mask = nan_mask[:, feature_idx].bool()
+                if missing_mask.any():
+                    seq_feature = torch.where(
+                        missing_mask.unsqueeze(-1),
+                        self.nan_token.expand(batch_size, -1),
+                        seq_feature
+                    )
+
             features.append(seq_feature)
             feature_idx += 1
-            
+
         if not features:
             raise ValueError("No features provided to the model")
-            
-        # Stack features: (B, num_features, hidden_dim)
-        x = torch.stack(features, dim=1)
-        
-        # Add column embeddings
-        x = x + self.column_embeddings[:len(features)].unsqueeze(0)
-        
-        # Add class token
-        class_tokens = self.class_token.expand(batch_size, -1, -1)  # (B, 1, hidden_dim)
-        x = torch.cat([class_tokens, x], dim=1)  # (B, 1+num_features, hidden_dim)
-        
-        # Apply transformer
-        x = self.transformer(x)  # (B, 1+num_features, hidden_dim)
-        
-        # Use only class token for prediction
-        class_output = x[:, 0, :]  # (B, hidden_dim)
-        
-        # Final prediction
+
+        # Stack & add column embeddings
+        x = torch.stack(features, dim=1)  # (B, F, H)
+        x = x + self.column_embeddings[:len(features)].unsqueeze(0)  # (1, F, H)
+
+        # Class token prepend
+        class_tokens = self.class_token.expand(batch_size, -1, -1)  # (B, 1, H)
+        x = torch.cat([class_tokens, x], dim=1)  # (B, 1+F, H)
+
+        # Transformer
+        x = self.transformer(x)  # (B, 1+F, H)
+
+        # CLS
+        class_output = x[:, 0, :]  # (B, H)
         output = self.output_layer(class_output)  # (B, 1)
-        
+
         return output.squeeze(1)  # (B,)
 
 
-
-
-def create_tabular_transformer_model(num_categorical_features=0, 
-                                   categorical_cardinalities=None,
-                                   num_numerical_features=0,
-                                   lstm_hidden=32,
-                                   hidden_dim=192,
-                                   n_heads=8,
-                                   n_layers=3,
-                                   ffn_size_factor=4/3,
-                                   attention_dropout=0.2,
-                                   ffn_dropout=0.1,
-                                   residual_dropout=0.0,
-                                   device="cuda"):
-    """Tabular Transformer 모델 생성 함수"""
+def create_tabular_transformer_model(
+    num_categorical_features=0,
+    categorical_cardinalities=None,
+    num_numerical_features=0,
+    lstm_hidden=32,
+    hidden_dim=192,
+    n_heads=8,
+    n_layers=3,
+    ffn_size_factor=4/3,
+    attention_dropout=0.2,
+    ffn_dropout=0.1,
+    residual_dropout=0.0,
+    device="cuda",
+):
     model = TabularTransformerModel(
         num_categorical_features=num_categorical_features,
         categorical_cardinalities=categorical_cardinalities,
@@ -237,6 +255,6 @@ def create_tabular_transformer_model(num_categorical_features=0,
         attention_dropout=attention_dropout,
         ffn_dropout=ffn_dropout,
         residual_dropout=residual_dropout,
-        device=device
+        device=device,
     ).to(device)
     return model
