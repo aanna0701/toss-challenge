@@ -147,6 +147,89 @@ def get_memory_usage():
     memory_mb = memory_info.rss / 1024 / 1024
     return memory_mb
 
+def print_model_summary(model, log_file_path=None, input_size=None):
+    """torchinfo를 사용하여 모델의 상세 구조를 출력하고 로그 파일에 저장"""
+    try:
+        from torchinfo import summary
+        
+        # 입력 크기 설정 (기본값)
+        if input_size is None:
+            # TabularTransformer 모델의 경우 대략적인 입력 크기 설정
+            input_size = [
+                (1, 10),  # x_categorical: (batch_size, num_categorical_features)
+                (1, 20),  # x_numerical: (batch_size, num_numerical_features)  
+                (1, 50),  # x_seq: (batch_size, seq_length)
+                (1,),     # seq_lengths: (batch_size,)
+                (1, 31)   # nan_mask: (batch_size, total_features)
+            ]
+        
+        # torchinfo로 모델 요약 생성
+        model_summary = summary(
+            model,
+            input_size=input_size,
+            col_names=["input_size", "output_size", "num_params", "trainable"],
+            verbose=0
+        )
+        
+        # 로그 파일에 저장
+        if log_file_path:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                f.write(f"모델 구조 Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n")
+                f.write(str(model_summary))
+                f.write("\n" + "=" * 80 + "\n")
+            print(f"📋 모델 구조가 로그 파일에 저장되었습니다: {log_file_path}")
+            
+    except ImportError:
+        print("⚠️  torchinfo가 설치되지 않았습니다. pip install torchinfo로 설치하세요.")
+        print("기본 summary를 사용합니다...")
+        
+        # 기본 summary (fallback)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        summary_text = f"""
+모델 구조 Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'=' * 80}
+모델 타입: {type(model).__name__}
+총 파라미터 수: {total_params:,}
+학습 가능한 파라미터: {trainable_params:,}
+학습 불가능한 파라미터: {total_params - trainable_params:,}
+{'=' * 80}
+        """
+        
+        print(summary_text)
+        
+        if log_file_path:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                f.write(summary_text)
+            print(f"📋 모델 구조가 로그 파일에 저장되었습니다: {log_file_path}")
+            
+    except Exception as e:
+        print(f"⚠️  모델 summary 생성 중 오류 발생: {e}")
+        print("기본 summary를 사용합니다...")
+        
+        # 기본 summary (fallback)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        summary_text = f"""
+모델 구조 Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'=' * 80}
+모델 타입: {type(model).__name__}
+총 파라미터 수: {total_params:,}
+학습 가능한 파라미터: {trainable_params:,}
+학습 불가능한 파라미터: {total_params - trainable_params:,}
+{'=' * 80}
+        """
+        
+        print(summary_text)
+        
+        if log_file_path:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                f.write(summary_text)
+            print(f"📋 모델 구조가 로그 파일에 저장되었습니다: {log_file_path}")
+
 def cleanup_memory():
     """메모리 정리 함수"""
     print(f"🧹 메모리 정리 시작 (현재 사용량: {get_memory_usage():.1f} MB)")
@@ -316,15 +399,7 @@ def main():
         })
         
         # 5. 모델 훈련
-        print_progress(4, total_steps, "모델 훈련")
-        print(f"🏋️ 모델 설정:")
-        print(f"   • Type: TabularTransformer")
-        print(f"   • Hidden Dim: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
-        print(f"   • N Heads: {CFG['MODEL']['TRANSFORMER']['N_HEADS']}")
-        print(f"   • N Layers: {CFG['MODEL']['TRANSFORMER']['N_LAYERS']}")
-        print(f"   • LSTM Hidden: {CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN']}")
-        
-        model = train_model(
+        model, feature_processor = train_model(
             train_df=train_data,
             feature_cols=feature_cols,
             seq_col=seq_col,
@@ -342,7 +417,7 @@ def main():
         
         # 6. 임시 웨이트 파일 저장
         print_progress(5, total_steps, "임시 웨이트 파일 저장")
-        save_model(model, temp_model_path)
+        save_model(model, temp_model_path, feature_processor)
         
         # Best checkpoint 경로 설정
         best_model_path = os.path.join(results_dir, "best.pth")
@@ -380,7 +455,7 @@ def main():
             'hidden_dim': CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
             'n_heads': CFG['MODEL']['TRANSFORMER']['N_HEADS'],
             'n_layers': CFG['MODEL']['TRANSFORMER']['N_LAYERS'],
-            'lstm_hidden': CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN'],
+            'lstm_hidden': CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],  # same as hidden_dim
             'epochs': CFG['EPOCHS'],
             'learning_rate': CFG['LEARNING_RATE'],
             'weight_decay': CFG['WEIGHT_DECAY'],
@@ -416,7 +491,8 @@ def main():
             seq_col=seq_col,
             CFG=CFG,
             model_path=model_path_for_prediction,
-            device=DEVICE
+            device=DEVICE,
+            feature_processor=feature_processor
         )
         print(f"💾 예측 후 메모리 사용량: {get_memory_usage():.1f} MB")
         

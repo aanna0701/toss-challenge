@@ -270,7 +270,6 @@ MODEL:
     ATTENTION_DROPOUT: 0.2
     FFN_DROPOUT: 0.1
     RESIDUAL_DROPOUT: 0.0
-    LSTM_HIDDEN: 32
 ```
 
 ## 🧠 모델 아키텍처

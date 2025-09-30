@@ -1,9 +1,14 @@
 # 기본 훈련 설정
-BATCH_SIZE: 4096
+BATCH_SIZE: 2048
 EPOCHS: 20
 LEARNING_RATE: 0.0001
 WEIGHT_DECAY: 0.00001
 SEED: 42
+
+# Warmup 설정
+WARMUP:
+  ENABLED: true
+  WARMUP_EPOCHS: 3  # warmup할 에포크 수
 
 # 검증 데이터 분할 비율
 VAL_SPLIT: 0.2
@@ -40,10 +45,9 @@ MODEL:
     N_HEADS: 8                # Number of attention heads
     N_LAYERS: 3               # Number of transformer layers
     FFN_SIZE_FACTOR: 1.333    # FFN size factor (4/3)
-    ATTENTION_DROPOUT: 0.2    # Attention dropout rate
-    FFN_DROPOUT: 0.1          # FFN dropout rate
+    ATTENTION_DROPOUT: 0.0    # Attention dropout rate
+    FFN_DROPOUT: 0.0          # FFN dropout rate
     RESIDUAL_DROPOUT: 0.0     # Residual dropout rate
-    LSTM_HIDDEN: 32           # LSTM hidden size for sequential features
     
   # 피처 분류 설정 (chunk_eda_results.json 기반)
   FEATURES:

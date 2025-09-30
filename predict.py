@@ -1,13 +1,14 @@
 import pandas as pd
 import torch
+import os
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-from data_loader import load_and_preprocess_data, ClickDataset, collate_fn_transformer_infer, FeatureProcessor
+from data_loader import ClickDataset, collate_fn_transformer_infer
 from model import *
 
 
-def predict(model, test_loader, device="cuda"):
+def predict(model, test_loader, device):
     """예측 함수 - 딕셔너리 배치에서 ID와 예측값을 함께 반환"""
     model.eval()
     predictions = []
@@ -45,10 +46,8 @@ def predict(model, test_loader, device="cuda"):
     
     return result
 
-def create_submission(prediction_result, CFG, output_path=None):
+def create_submission(prediction_result, CFG, output_path):
     """제출 파일 생성 함수 - 딕셔너리 형태의 예측 결과를 받음"""
-    if output_path is None:
-        output_path = CFG['PATHS']['SUBMISSION']
     
     # 예측 결과에서 ID와 predictions 추출
     ids = prediction_result['ids']
@@ -72,38 +71,27 @@ def create_submission(prediction_result, CFG, output_path=None):
     print(f"Submission shape: {submit.shape}")
     return submit
 
-def load_trained_model(feature_cols, CFG, model_path=None, device="cuda"):
+def load_trained_model(feature_processor, CFG, model_path, device):
     """훈련된 모델 로드 함수"""
-    try:
-        if model_path is None:
-            model_path = CFG['PATHS']['MODEL_SAVE']
-        
-        print(f"🔧 모델 로딩 시작...")
-        print(f"   • 모델 경로: {model_path}")
-        print(f"   • 피처 개수: {len(feature_cols)}")
-        print(f"   • 디바이스: {device}")
-        
-        # TabularTransformer 모델용 피처 정보 (훈련 시와 동일한 FeatureProcessor 필요)
-        # 실제로는 훈련 시 저장된 feature_processor 정보를 로드해야 함
-        # 여기서는 간단히 config에서 가져옴
-        categorical_cardinalities = [2, 8, 20, 7, 24]  # gender, age_group, inventory_id, day_of_week, hour
-        num_categorical_features = len(CFG['MODEL']['FEATURES']['CATEGORICAL'])
-        num_numerical_features = len(feature_cols) - num_categorical_features - 1  # seq 제외
-        
-        print(f"   • 범주형 피처: {num_categorical_features}개")
-        print(f"   • 수치형 피처: {num_numerical_features}개")
-        print(f"   • 범주형 카디널리티: {categorical_cardinalities}")
-        
-    except KeyError as e:
-        raise KeyError(f"❌ 설정 파일에서 필요한 키를 찾을 수 없습니다: {e}")
-    except Exception as e:
-        raise Exception(f"❌ 모델 로딩 준비 중 오류 발생: {e}")
+    print(f"🔧 모델 로딩 시작...")
+    print(f"   • 모델 경로: {model_path}")
+    print(f"   • 디바이스: {device}")
+    
+    # FeatureProcessor에서 피처 정보 추출
+    categorical_cardinalities = list(feature_processor.categorical_cardinalities.values())
+    num_categorical_features = len(feature_processor.categorical_features)
+    num_numerical_features = len(feature_processor.numerical_features)
+    
+    print(f"✅ 피처 정보:")
+    print(f"   • 범주형 피처: {num_categorical_features}개")
+    print(f"   • 수치형 피처: {num_numerical_features}개")
+    print(f"   • 범주형 카디널리티: {categorical_cardinalities}")
     
     model = create_tabular_transformer_model(
         num_categorical_features=num_categorical_features,
         categorical_cardinalities=categorical_cardinalities,
         num_numerical_features=num_numerical_features,
-        lstm_hidden=CFG['MODEL']['TRANSFORMER']['LSTM_HIDDEN'],
+        lstm_hidden=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
         hidden_dim=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
         n_heads=CFG['MODEL']['TRANSFORMER']['N_HEADS'],
         n_layers=CFG['MODEL']['TRANSFORMER']['N_LAYERS'],
@@ -125,11 +113,14 @@ def load_trained_model(feature_cols, CFG, model_path=None, device="cuda"):
     
     return model
 
-def run_inference(model, test_data, feature_cols, seq_col, batch_size, CFG, device="cuda"):
+def run_inference(model, test_data, feature_cols, seq_col, batch_size, CFG, device, feature_processor):
     """추론 실행 함수"""
-    # TabularTransformer 모델용 데이터셋
-    feature_processor = FeatureProcessor(CFG)
-    feature_processor.fit(test_data)  # 테스트 데이터로 fit (실제로는 훈련 데이터로 fit해야 함)
+    # FeatureProcessor가 제공되지 않은 경우 에러 발생
+    if feature_processor is None:
+        raise ValueError("❌ FeatureProcessor가 제공되지 않았습니다. predict_test_data에서 생성된 FeatureProcessor를 사용해야 합니다.")
+    
+    print("✅ 제공된 FeatureProcessor를 사용합니다.")
+    
     test_dataset = ClickDataset(test_data, feature_processor, has_target=False, has_id=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
     
@@ -139,9 +130,9 @@ def run_inference(model, test_data, feature_cols, seq_col, batch_size, CFG, devi
     return prediction_result
 
 
-def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path=None, device="cuda"):
+def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path, device, feature_processor):
     # 모델 로드
-    model = load_trained_model(feature_cols, CFG, model_path, device)
+    model = load_trained_model(feature_processor, CFG, model_path, device)
     
     # 예측 수행
     prediction_result = run_inference(
@@ -151,11 +142,15 @@ def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path=None, de
         seq_col=seq_col,
         batch_size=CFG['BATCH_SIZE'],
         CFG=CFG,
-        device=device
+        device=device,
+        feature_processor=feature_processor
     )
     
-    # 제출 파일 생성
-    submission = create_submission(prediction_result, CFG=CFG)
+    # 제출 파일 생성 (임시 파일로 저장)
+    import tempfile
+    import os
+    temp_submission_path = os.path.join(tempfile.gettempdir(), "temp_submission.csv")
+    submission = create_submission(prediction_result, CFG=CFG, output_path=temp_submission_path)
     
     predictions = prediction_result['predictions']
     print(f"✅ 예측 완료!")

@@ -9,76 +9,85 @@ import numpy as np
 import json
 import os
 from pathlib import Path
-import yaml
 from datetime import datetime
 import argparse
 
 
-def load_config(config_path="../config.yaml"):
-    """설정 파일 로드"""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def safe_load_parquet(file_path, sample_size=None, use_sampling=False):
-    """안전한 parquet 로드 함수 (메모리 효율적)"""
-    print(f"⚠️  {file_path} 대용량 데이터 - 청크 단위로 처리...")
+def load_parquet_chunked_precise(file_path, chunk_size=100000):
+    """청크 단위로 로드하여 double precision으로 정확한 통계 계산"""
+    print(f"📊 {file_path} 청크 단위로 로드 중...")
     
     try:
         import pyarrow.parquet as pq
         parquet_file = pq.ParquetFile(file_path)
         total_rows = parquet_file.metadata.num_rows
-        print(f"📊 총 {total_rows:,} 행 처리 예정")
+        total_chunks = (total_rows + chunk_size - 1) // chunk_size
         
-        # 청크 단위로 통계 계산
+        print(f"📈 총 {total_rows:,} 행, {total_chunks}개 청크로 처리")
+        
+        # 통계 누적을 위한 딕셔너리 (double precision 사용)
         stats_accumulator = {}
         processed_rows = 0
         
-        for batch in parquet_file.iter_batches(batch_size=10000):  # 배치 크기 줄임
+        # 첫 번째 청크로 컬럼 정보 파악
+        first_batch = next(parquet_file.iter_batches(batch_size=1000))
+        first_df = first_batch.to_pandas()
+        numeric_cols = first_df.select_dtypes(include=[np.number]).columns
+        print(f"📋 수치형 컬럼 수: {len(numeric_cols)}")
+        
+        # 각 컬럼별 누적 통계 초기화 (double precision)
+        for col in numeric_cols:
+            stats_accumulator[col] = {
+                'sum': 0.0,           # double precision
+                'sum_sq': 0.0,        # double precision  
+                'count': 0,
+                'min': np.inf,
+                'max': -np.inf
+            }
+        
+        # 청크별 처리
+        for chunk_idx, batch in enumerate(parquet_file.iter_batches(batch_size=chunk_size)):
             chunk_df = batch.to_pandas()
             processed_rows += len(chunk_df)
             
-            # 각 컬럼별로 누적 통계 계산
-            for col in chunk_df.select_dtypes(include=[np.number]).columns:
-                if col not in stats_accumulator:
-                    stats_accumulator[col] = {
-                        'sum': 0.0,
-                        'sum_sq': 0.0,
-                        'count': 0,
-                        'min': np.inf,
-                        'max': -np.inf
-                    }
-                
-                col_data = chunk_df[col].dropna()
-                if len(col_data) > 0:
-                    stats_accumulator[col]['sum'] += col_data.sum()
-                    stats_accumulator[col]['sum_sq'] += (col_data ** 2).sum()
-                    stats_accumulator[col]['count'] += len(col_data)
-                    stats_accumulator[col]['min'] = min(stats_accumulator[col]['min'], col_data.min())
-                    stats_accumulator[col]['max'] = max(stats_accumulator[col]['max'], col_data.max())
+            print(f"\r📊 처리 중: {chunk_idx+1}/{total_chunks} 청크 "
+                  f"({(chunk_idx+1)/total_chunks*100:.1f}%)", end="", flush=True)
             
-            if processed_rows % 100000 == 0:  # 10만 행마다 진행률 출력
-                print(f"📈 진행률: {processed_rows:,}/{total_rows:,} ({processed_rows/total_rows*100:.1f}%)")
+            # 각 컬럼별로 누적 통계 계산 (double precision)
+            for col in numeric_cols:
+                if col in chunk_df.columns:
+                    col_data = chunk_df[col].dropna()
+                    if len(col_data) > 0:
+                        # double precision으로 변환하여 계산
+                        col_data_double = col_data.astype(np.float64)
+                        
+                        stats = stats_accumulator[col]
+                        stats['sum'] += col_data_double.sum()
+                        stats['sum_sq'] += (col_data_double ** 2).sum()
+                        stats['count'] += len(col_data_double)
+                        stats['min'] = min(stats['min'], col_data_double.min())
+                        stats['max'] = max(stats['max'], col_data_double.max())
         
-        print(f"📈 최종 진행률: {processed_rows:,}/{total_rows:,} (100.0%)")
+        print(f"\n✅ 모든 청크 처리 완료!")
         
-        # 최종 통계 계산
+        # 최종 통계 계산 (double precision)
         final_stats = {}
         for col, stats in stats_accumulator.items():
             if stats['count'] > 0:
+                # double precision으로 정확한 mean/std 계산
                 mean = stats['sum'] / stats['count']
                 variance = (stats['sum_sq'] / stats['count']) - (mean ** 2)
                 std = np.sqrt(max(0, variance))  # 음수 방지
                 
                 final_stats[col] = {
-                    'mean': float(mean),
-                    'std': float(std),
+                    'mean': float(mean),      # double precision 유지
+                    'std': float(std),        # double precision 유지
                     'min': float(stats['min']),
                     'max': float(stats['max']),
                     'count': int(stats['count'])
                 }
         
+        print(f"✅ 정확한 통계 계산 완료: {len(final_stats)}개 컬럼")
         return final_stats
         
     except Exception as e:
@@ -106,9 +115,9 @@ def compute_normalization_stats(train_data_path, output_path, feature_cols=None,
         exclude_cols = {'ID', 'clicked', 'seq'}  # ID, target, sequence 컬럼 제외
     
     try:
-        # 데이터 로드 (메모리 효율적)
+        # 데이터 로드 (청크 단위, double precision)
         print("\n📊 데이터 로드 중...")
-        stats = safe_load_parquet(train_data_path)
+        stats = load_parquet_chunked_precise(train_data_path)
         
         # 제외할 컬럼들 필터링
         if exclude_cols:
@@ -118,7 +127,7 @@ def compute_normalization_stats(train_data_path, output_path, feature_cols=None,
         if feature_cols:
             stats = {col: stat for col, stat in stats.items() if col in feature_cols}
         
-        print(f"✅ 청크 단위 처리 완료")
+        print(f"✅ 청크 단위 처리 완료 (double precision)")
         print(f"📈 계산된 컬럼 수: {len(stats)}")
         print(f"📋 컬럼 목록: {list(stats.keys())[:10]}{'...' if len(stats) > 10 else ''}")
         
@@ -160,28 +169,23 @@ def compute_normalization_stats(train_data_path, output_path, feature_cols=None,
 def main():
     """메인 함수"""
     parser = argparse.ArgumentParser(description='Train set normalization 통계 계산')
-    parser.add_argument('--config', default='../config.yaml', help='설정 파일 경로')
+    parser.add_argument('--train_data', required=True, help='Train 데이터 파일 경로 (예: data/train.parquet)')
     parser.add_argument('--output', default='results/normalization_stats.json', help='출력 파일 경로')
     parser.add_argument('--exclude', nargs='*', default=['ID', 'clicked', 'seq'], help='제외할 컬럼들')
     
     args = parser.parse_args()
     
-    # 설정 로드
-    config = load_config(args.config)
-    train_data_path = config['PATHS']['TRAIN_DATA']
-    
-    # 상대 경로를 절대 경로로 변환
-    if not os.path.isabs(train_data_path):
-        train_data_path = os.path.join(os.path.dirname(args.config), train_data_path)
-    
     # 결과 파일 경로 설정
     output_path = args.output
     if not os.path.isabs(output_path):
-        output_path = os.path.join(os.path.dirname(args.config), 'analysis', output_path)
+        output_path = os.path.join(os.getcwd(), output_path)
+    
+    # 출력 디렉토리 생성
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     # 통계 계산 실행
     compute_normalization_stats(
-        train_data_path=train_data_path,
+        train_data_path=args.train_data,
         output_path=output_path,
         exclude_cols=set(args.exclude)
     )
