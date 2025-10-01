@@ -52,14 +52,16 @@ def create_results_directory():
     # train_fold1.parquet -> fold1, train_fold2.parquet -> fold2
     if 'train_fold' in train_data_path:
         fold_match = os.path.basename(train_data_path).replace('train_fold', '').replace('.parquet', '')
-        folder_name = f"fold{fold_match}"
+        fold_name = f"fold{fold_match}"
     else:
-        folder_name = "full_data"
+        fold_name = "full_data"
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"{folder_name}_{timestamp}"
     
-    # 기존 results 디렉토리가 있으면 삭제하고 새로 생성
+    # {timestamp}/{fold}/ 구조로 디렉토리 생성
+    results_dir = os.path.join(timestamp, fold_name)
+    
+    # 기존 디렉토리가 있으면 삭제하고 새로 생성
     if os.path.exists(results_dir):
         import shutil
         shutil.rmtree(results_dir)

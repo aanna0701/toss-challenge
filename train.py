@@ -316,12 +316,12 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             optimizer.step()
             epoch_train_loss += loss.item() * ys.size(0)
             
-            # 스텝별 로깅 (10 에폭 단위로만 저장)
+            # 스텝별 로깅 (10 스텝마다 저장)
             current_lr = optimizer.param_groups[0]['lr']
             warmup_factor = global_step / warmup_steps if warmup_enabled and global_step <= warmup_steps else 1.0
             
-            # 10 에폭 단위일 때만 로그 저장
-            if epoch % 10 == 0:
+            # 10 스텝마다 로그 저장
+            if global_step % 50 == 0:
                 log_entry = {
                     'step': global_step,
                     'epoch': epoch,
@@ -331,6 +331,11 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
                     'warmup_factor': warmup_factor
                 }
                 training_logs.append(log_entry)
+                
+                # 실시간으로 CSV 파일에 기록
+                if detailed_log_path:
+                    with open(detailed_log_path, 'a', encoding='utf-8') as f:
+                        f.write(f"{log_entry['step']},{log_entry['epoch']},{log_entry['batch_idx']},{log_entry['train_loss']:.6f},{log_entry['learning_rate']:.8f},{log_entry['warmup_factor']:.3f},,,,\n")
             
             # 스텝별 출력 (매 100 스텝마다)
             if global_step % 100 == 0:
@@ -379,15 +384,11 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             }
             training_logs.append(epoch_log_entry)
         
-        # 상세 로그 파일에 에포크별 검증 결과 기록 (10 에폭마다)
-        if detailed_log_path and epoch % 10 == 0:
-            # 해당 에폭의 모든 스텝 로그를 파일에 저장
-            epoch_logs = [log for log in training_logs if log['epoch'] == epoch and 'val_score' not in log]
+        # 상세 로그 파일에 에포크별 검증 결과 기록 (매 에폭마다)
+        if detailed_log_path:
+            # 검증 결과만 추가 (스텝별 로그는 이미 실시간으로 기록됨)
             with open(detailed_log_path, 'a', encoding='utf-8') as f:
-                for log in epoch_logs:
-                    f.write(f"{log['step']},{log['epoch']},{log['batch_idx']},{log['train_loss']:.6f},{log['learning_rate']:.8f},{log['warmup_factor']:.3f},,,,\n")
-                # 검증 결과 추가
-                f.write(f"{global_step},{epoch},-1,{epoch_train_loss:.6f},{optimizer.param_groups[0]['lr']:.8f},1.0,{val_metrics['loss']:.6f},{val_metrics['ap']:.6f},{val_metrics['wll']:.6f},{val_metrics['score']:.6f}\n")  # 구분선
+                f.write(f"{global_step},{epoch},-1,{epoch_train_loss:.6f},{optimizer.param_groups[0]['lr']:.8f},1.0,{val_metrics['loss']:.6f},{val_metrics['ap']:.6f},{val_metrics['wll']:.6f},{val_metrics['score']:.6f}\n")
     
         # 5 epoch마다 checkpoint 저장
         if epoch % 5 == 0:
