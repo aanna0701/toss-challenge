@@ -227,15 +227,15 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     gradient_norm_logs = []
     
     # 상세 로그 파일 설정 (CSV 형태)
-    detailed_log_path = None
+    train_log_path = None
     if results_dir:
-        detailed_log_path = os.path.join(results_dir, "training_detailed.csv")
+        train_log_path = os.path.join(results_dir, "training_logs.csv")
         
         # CSV 파일 헤더 작성
-        with open(detailed_log_path, 'w', encoding='utf-8') as f:
+        with open(train_log_path, 'w', encoding='utf-8') as f:
             f.write("step,epoch,batch_idx,train_loss,learning_rate,warmup_factor,val_loss,val_ap,val_wll,val_score\n")
         
-        print(f"📊 상세 로그 파일 생성 (CSV): {detailed_log_path}")
+        print(f"📊 상세 로그 파일 생성 (CSV): {train_log_path}")
     
     # Checkpoint 저장 디렉토리 생성
     if results_dir is None:
@@ -329,16 +329,14 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
                     'train_loss': loss.item(),
                     'learning_rate': current_lr,
                     'warmup_factor': warmup_factor
-                }
-                training_logs.append(log_entry)
-                
+                }                
                 # 실시간으로 CSV 파일에 기록
-                if detailed_log_path:
-                    with open(detailed_log_path, 'a', encoding='utf-8') as f:
+                if train_log_path:
+                    with open(train_log_path, 'a', encoding='utf-8') as f:
                         f.write(f"{log_entry['step']},{log_entry['epoch']},{log_entry['batch_idx']},{log_entry['train_loss']:.6f},{log_entry['learning_rate']:.8f},{log_entry['warmup_factor']:.3f},,,,\n")
             
             # 스텝별 출력 (매 100 스텝마다)
-            if global_step % 100 == 0:
+            if global_step % 50 == 0:
                 print(f"[Step {global_step}] Epoch {epoch}/{CFG['EPOCHS']}, Batch {batch_idx+1}/{steps_per_epoch}")
                 print(f"   • Train Loss: {loss.item():.4f}")
                 print(f"   • Learning Rate: {current_lr:.6f}")
@@ -370,24 +368,21 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         print(f"   • Current LR: {optimizer.param_groups[0]['lr']:.6f}")
         print_metrics(val_metrics, "Val ")
         
-        # 에포크별 검증 로그 저장 (10 에폭 단위로만)
-        if epoch % 10 == 0:
-            epoch_log_entry = {
-                'step': global_step,
-                'epoch': epoch,
-                'epoch_train_loss': epoch_train_loss,
-                'val_loss': val_metrics['loss'],
-                'val_ap': val_metrics['ap'],
-                'val_wll': val_metrics['wll'],
-                'val_score': val_metrics['score'],
-                'learning_rate': optimizer.param_groups[0]['lr']
-            }
-            training_logs.append(epoch_log_entry)
+        epoch_log_entry = {
+            'step': global_step,
+            'epoch': epoch,
+            'epoch_train_loss': epoch_train_loss,
+            'val_loss': val_metrics['loss'],
+            'val_ap': val_metrics['ap'],
+            'val_wll': val_metrics['wll'],
+            'val_score': val_metrics['score'],
+            'learning_rate': optimizer.param_groups[0]['lr']
+        }
         
         # 상세 로그 파일에 에포크별 검증 결과 기록 (매 에폭마다)
-        if detailed_log_path:
+        if train_log_path:
             # 검증 결과만 추가 (스텝별 로그는 이미 실시간으로 기록됨)
-            with open(detailed_log_path, 'a', encoding='utf-8') as f:
+            with open(train_log_path, 'a', encoding='utf-8') as f:
                 f.write(f"{global_step},{epoch},-1,{epoch_train_loss:.6f},{optimizer.param_groups[0]['lr']:.8f},1.0,{val_metrics['loss']:.6f},{val_metrics['ap']:.6f},{val_metrics['wll']:.6f},{val_metrics['score']:.6f}\n")
     
         # 5 epoch마다 checkpoint 저장
@@ -431,28 +426,8 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
             os.makedirs(results_dir, exist_ok=True)
         
-        # 스텝별 로그 저장 (JSON 형태로 백업)
-        log_filepath = os.path.join(results_dir, "training_logs.json")
-        save_training_logs(training_logs, log_filepath)
-        
-        # 상세 로그 파일에 훈련 완료 요약 추가
-        if detailed_log_path:
-            with open(detailed_log_path, 'a', encoding='utf-8') as f:
-                # 훈련 완료 요약
-                f.write(f"# Training completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"# Total steps: {global_step}\n")
-                f.write(f"# Total epochs: {CFG['EPOCHS']}\n")
-                if warmup_enabled:
-                    f.write(f"# Warmup steps: {warmup_steps}\n")
-                    f.write(f"# Final LR: {CFG['LEARNING_RATE']:.8f}\n")
-                
-                # 최고 성능 정보
-                epoch_logs = [log for log in training_logs if 'val_score' in log]
-                if epoch_logs:
-                    best_epoch_log = max(epoch_logs, key=lambda x: x['val_score'])
-                    f.write(f"# Best performance: Step {best_epoch_log['step']}, Epoch {best_epoch_log['epoch']}, Val Score {best_epoch_log['val_score']:.6f}\n")
-        
-        print(f"📊 CSV 로그 저장 완료: {detailed_log_path}")
+ 
+        print(f"📊 CSV 로그 저장 완료: {train_log_path}")
         
         # Warmup 정보 출력
         if warmup_enabled:
