@@ -37,7 +37,7 @@ args = parse_args()
 CFG = load_config(args.config)
 
 from utils import seed_everything, get_device
-from data_loader import load_and_preprocess_data
+from data_loader import load_train_data, load_test_data
 from model import *
 from train import train_model, save_model
 from predict import predict_test_data
@@ -247,17 +247,13 @@ def cleanup_memory():
     
     print(f"🧹 메모리 정리 완료 (현재 사용량: {get_memory_usage():.1f} MB)")
 
-def cleanup_train_data(train_data, test_data=None):
+def cleanup_train_data(train_data):
     """훈련 데이터 및 관련 변수 메모리에서 제거"""
     print(f"🗑️  훈련 데이터 메모리에서 제거 시작 (현재 사용량: {get_memory_usage():.1f} MB)")
     
     # 훈련 데이터 삭제
     del train_data
     print(f"   • train_data 변수 삭제")
-    
-    # 테스트 데이터는 예측에 필요하므로 유지
-    if test_data is not None:
-        print(f"   • test_data 유지 (예측에 필요)")
     
     # 메모리 정리
     cleanup_memory()
@@ -376,24 +372,21 @@ def main():
         print_progress(3, total_steps, "데이터 로드 및 전처리")
         print(f"💾 초기 메모리 사용량: {get_memory_usage():.1f} MB")
         
-        # 데이터 로드
-        print("📊 데이터 로딩 시작...")
+        # 훈련 데이터만 로드 (효율적)
+        print("📊 훈련 데이터 로딩 시작...")
         print(f"   • 훈련 데이터: {CFG['PATHS']['TRAIN_DATA']}")
-        print(f"   • 테스트 데이터: ./test.parquet")
         
-        train_data, test_data, feature_cols, seq_col, target_col = load_and_preprocess_data(CFG)
-        print(f"💾 데이터 로드 후 메모리 사용량: {get_memory_usage():.1f} MB")
+        train_data, feature_cols, seq_col, target_col = load_train_data(CFG)
+        print(f"💾 훈련 데이터 로드 후 메모리 사용량: {get_memory_usage():.1f} MB")
         
         # 데이터 로딩 정보 설정
         data_loading_info = f"데이터: {CFG['PATHS']['TRAIN_DATA']}"
         
-        print_step_summary("데이터 로드", {
+        print_step_summary("훈련 데이터 로드", {
             "Train Shape": train_data.shape,
-            "Test Shape": test_data.shape,
             "Features": len(feature_cols),
             "Sequence Column": seq_col,
             "Target Column": target_col,
-            "Test ID Column": "ID" in test_data.columns,
             "Data Loading": data_loading_info,
             "Memory Usage": f"{get_memory_usage():.1f} MB"
         })
@@ -436,15 +429,13 @@ def main():
         train_shape = train_data.shape
         model_info_data = {
             'train_shape': train_shape,
-            'test_shape': test_data.shape,
             'num_features': len(feature_cols)
         }
         
         # 훈련 데이터 메모리에서 제거
-        cleanup_train_data(train_data, test_data)
+        cleanup_train_data(train_data)
         print_step_summary("메모리 정리", {
             "Train Data": "메모리에서 제거됨",
-            "Test Data": "유지됨 (예측에 필요)",
             "Memory Usage": f"{get_memory_usage():.1f} MB"
         })
         
@@ -461,7 +452,6 @@ def main():
             'weight_decay': CFG['WEIGHT_DECAY'],
             'batch_size': CFG['BATCH_SIZE'],
             'train_shape': model_info_data['train_shape'],
-            'test_shape': model_info_data['test_shape'],
             'num_features': model_info_data['num_features'],
             'early_stopping': CFG['EARLY_STOPPING']['ENABLED'],
             'monitor_metric': CFG['EARLY_STOPPING']['MONITOR'],
@@ -469,12 +459,17 @@ def main():
         }
         print_step_summary("정보 수집", {
             "Model Parameters": len(model_info),
-            "Training Data Shape": model_info_data['train_shape'],
-            "Test Data Shape": model_info_data['test_shape']
+            "Training Data Shape": model_info_data['train_shape']
         })
         
         # 8. 예측 실행
         print_progress(8, total_steps, "테스트 데이터 예측")
+        
+        # 테스트 데이터 로드 (예측 시에만)
+        print("📊 테스트 데이터 로딩 시작...")
+        print(f"   • 테스트 데이터: {CFG['PATHS']['TEST_DATA']}")
+        test_data = load_test_data(CFG)
+        
         print(f"🔮 예측 설정:")
         print(f"   • Test Data Shape: {test_data.shape}")
         print(f"   • Features: {len(feature_cols)}")

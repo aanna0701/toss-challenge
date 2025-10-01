@@ -1,15 +1,13 @@
-import os
-
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data_loader import (
+    FeatureProcessor,
     ClickDataset,
     collate_fn_transformer_infer,
-    create_data_loaders,
 )
+from torch.utils.data import DataLoader
 from model import create_tabular_transformer_model
 
 
@@ -119,18 +117,22 @@ def load_trained_model(feature_processor, CFG, model_path, device):
     return model
 
 def predict_test_data(test_data, feature_cols, seq_col, target_col, CFG, model_path, device):
-    # create_data_loaders를 사용하여 FeatureProcessor 및 테스트 로더 생성
-    print("🔧 create_data_loaders를 사용하여 FeatureProcessor 및 테스트 로더 생성...")
-    _, _, test_loader, _, _, feature_processor = create_data_loaders(
-        train_df=None,
-        val_df=None,
-        test_df=test_data,
-        feature_cols=feature_cols,
-        seq_col=seq_col,
-        target_col=target_col,
-        batch_size=CFG['BATCH_SIZE'],
-        config=CFG
-    )
+    # FeatureProcessor 직접 생성 및 테스트 로더 생성
+    print("🔧 FeatureProcessor 및 테스트 로더 생성...")
+    
+    # FeatureProcessor 생성 및 학습 (더미 데이터로 학습)
+    feature_processor = FeatureProcessor(config=CFG, normalization_stats_path="analysis/results/normalization_stats.json")
+    
+    # 더미 데이터로 학습 (실제 훈련 데이터가 없으므로)
+    dummy_data = {col: [0.0] for col in feature_cols}
+    dummy_data[seq_col] = ["0.0"]
+    dummy_data[target_col] = [0.0]
+    dummy_train_df = pd.DataFrame(dummy_data)
+    feature_processor.fit(dummy_train_df)
+    
+    # 테스트 데이터셋 생성
+    test_dataset = ClickDataset(test_data, feature_processor, has_target=False, has_id=True)
+    test_loader = DataLoader(test_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, collate_fn=collate_fn_transformer_infer)
     
     # 모델 로드
     model = load_trained_model(feature_processor, CFG, model_path, device)

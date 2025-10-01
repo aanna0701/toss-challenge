@@ -17,7 +17,6 @@ def load_fold_data(fold_number):
     
     print(f"  ✅ 로딩 완료: {len(data):,}개 행, {load_time:.2f}초")
     print(f"  📊 데이터 분포:")
-    print(f"    - feat_e_3 missing: {data['feat_e_3'].isna().sum():,}개")
     print(f"    - clicked=0: {(data['clicked']==0).sum():,}개")
     print(f"    - clicked=1: {(data['clicked']==1).sum():,}개")
     

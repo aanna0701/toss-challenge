@@ -297,30 +297,23 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
     
     return train_loader, val_loader, test_loader, train_dataset, val_dataset, feature_processor
 
-    """데이터 로드 및 전처리 함수"""
-    def safe_load_parquet(file_path):
-        """안전한 parquet 로드 함수 - 항상 전체 데이터 로드"""
-        print(f"📊 전체 데이터 로드 - {file_path}")
-        try:
-            return pd.read_parquet(file_path, engine="pyarrow")
-        except Exception as e:
-            print(f"⚠️  데이터 로드 실패: {e}")
-            raise
-    
-    # 데이터 로드
-    print("📊 훈련 데이터 로드 중...")
-    all_train = safe_load_parquet(CFG['PATHS']['TRAIN_DATA'])
-    
-    print("📊 테스트 데이터 로드 중...")
-    test = safe_load_parquet(CFG['PATHS']['TEST_DATA'])
-    # 테스트 데이터에는 ID 컬럼이 반드시 있어야 함 (예측 시 필요)
-    if 'ID' not in test.columns:
-        raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 예측을 위해서는 ID가 필요합니다.")
-    
-    print(f"✅ 테스트 데이터 로드 완료: {test.shape[0]}개 행, ID 컬럼 포함")
 
+def safe_load_parquet(file_path):
+    """안전한 parquet 로드 함수 - 항상 전체 데이터 로드"""
+    print(f"📊 전체 데이터 로드 - {file_path}")
+    try:
+        return pd.read_parquet(file_path, engine="pyarrow")
+    except Exception as e:
+        print(f"⚠️  데이터 로드 실패: {e}")
+        raise
+
+
+def load_train_data(config):
+    """훈련 데이터만 로드 및 전처리 함수"""
+    print("📊 훈련 데이터 로드 중...")
+    all_train = safe_load_parquet(config['PATHS']['TRAIN_DATA'])
+    
     print("Train shape:", all_train.shape)
-    print("Test shape:", test.shape)
 
     # feat_e_3 missing 기준으로 샘플링
     # 1. feat_e_3이 missing인 데이터는 모두 포함
@@ -368,4 +361,32 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
     print("Sequence:", seq_col)
     print("Target:", target_col)
 
+    return train, feature_cols, seq_col, target_col
+
+
+def load_test_data(config):
+    """테스트 데이터만 로드 함수"""
+    print("📊 테스트 데이터 로드 중...")
+    test = safe_load_parquet(config['PATHS']['TEST_DATA'])
+    
+    # 테스트 데이터에는 ID 컬럼이 반드시 있어야 함 (예측 시 필요)
+    if 'ID' not in test.columns:
+        raise ValueError("❌ 테스트 데이터에 'ID' 컬럼이 없습니다! 예측을 위해서는 ID가 필요합니다.")
+    
+    print(f"✅ 테스트 데이터 로드 완료: {test.shape[0]}개 행, ID 컬럼 포함")
+    print("Test shape:", test.shape)
+    
+    return test
+
+
+def load_and_preprocess_data(config):
+    """데이터 로드 및 전처리 함수 (하위 호환성을 위해 유지)"""
+    print("⚠️  load_and_preprocess_data는 비효율적입니다. load_train_data와 load_test_data를 개별적으로 사용하세요.")
+    
+    # 훈련 데이터 로드
+    train, feature_cols, seq_col, target_col = load_train_data(config)
+    
+    # 테스트 데이터 로드
+    test = load_test_data(config)
+    
     return train, test, feature_cols, seq_col, target_col

@@ -7,7 +7,12 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from data_loader import create_data_loaders
+from data_loader import (
+    FeatureProcessor,
+    ClickDataset,
+    collate_fn_transformer_train,
+)
+from torch.utils.data import DataLoader
 from early_stopping import create_early_stopping_from_config
 from gradient_norm import (
     analyze_gradient_behavior,
@@ -113,9 +118,17 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     print(f"   • 검증 데이터 클래스 비율: clicked=0 ({val_ratio_0:.3f}), clicked=1 ({val_ratio_1:.3f})")
 
     # 2) Dataset / Loader
-    train_loader, val_loader, _, train_dataset, val_dataset, feature_processor = create_data_loaders(
-        tr_df, va_df, None, feature_cols, seq_col, target_col, CFG['BATCH_SIZE'], CFG
-    )
+    # FeatureProcessor 생성 및 학습
+    feature_processor = FeatureProcessor(config=CFG, normalization_stats_path="analysis/results/normalization_stats.json")
+    feature_processor.fit(tr_df)
+    
+    # 훈련 및 검증 데이터셋 생성
+    train_dataset = ClickDataset(tr_df, feature_processor, target_col, has_target=True, has_id=False)
+    val_dataset = ClickDataset(va_df, feature_processor, target_col, has_target=True, has_id=False)
+    
+    # 데이터로더 생성
+    train_loader = DataLoader(train_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=True, collate_fn=collate_fn_transformer_train)
+    val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, collate_fn=collate_fn_transformer_train)
 
     # 3) TabularTransformer 모델 생성
     categorical_cardinalities = list(feature_processor.categorical_cardinalities.values())
