@@ -41,12 +41,12 @@ GRADIENT_NORM:
 MODEL:
   # TabularTransformer 모델 설정
   TRANSFORMER:
-    HIDDEN_DIM: 192           # Transformer hidden dimension
+    HIDDEN_DIM: 64            # Transformer hidden dimension
     N_HEADS: 8                # Number of attention heads
     N_LAYERS: 3               # Number of transformer layers
     FFN_SIZE_FACTOR: 1.333    # FFN size factor (4/3)
-    ATTENTION_DROPOUT: 0.0    # Attention dropout rate
-    FFN_DROPOUT: 0.0          # FFN dropout rate
+    ATTENTION_DROPOUT: 0.2    # Attention dropout rate
+    FFN_DROPOUT: 0.2          # FFN dropout rate
     RESIDUAL_DROPOUT: 0.0     # Residual dropout rate
     
   # 피처 분류 설정 (chunk_eda_results.json 기반)

@@ -3,13 +3,15 @@
 훈련 후 자동으로 예측을 실행하고 결과를 날짜별로 저장하는 워크플로우 스크립트
 """
 
-import os
+import argparse
 import gc
+import json
+import logging
+import os
 import psutil
 import traceback
-import logging
-import argparse
 from datetime import datetime
+
 import yaml
 
 def parse_args():
@@ -132,7 +134,6 @@ def save_error_summary(results_dir, error_log_path, error_count=1):
         }
     }
     
-    import json
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     
@@ -296,7 +297,6 @@ def save_results_with_metadata(results_dir, submission_df, model_info, model_pat
     }
     
     metadata_path = os.path.join(results_dir, f"metadata_{timestamp}.json")
-    import json
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
     print(f"📋 메타데이터 저장: {metadata_path}")
@@ -489,10 +489,10 @@ def main():
             test_data=test_data,
             feature_cols=feature_cols,
             seq_col=seq_col,
+            target_col=target_col,
             CFG=CFG,
             model_path=model_path_for_prediction,
-            device=DEVICE,
-            feature_processor=feature_processor
+            device=DEVICE
         )
         print(f"💾 예측 후 메모리 사용량: {get_memory_usage():.1f} MB")
         

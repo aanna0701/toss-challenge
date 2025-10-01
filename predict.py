@@ -1,11 +1,16 @@
+import os
+
 import pandas as pd
 import torch
-import os
-from tqdm import tqdm
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from data_loader import ClickDataset, collate_fn_transformer_infer
-from model import *
+from data_loader import (
+    ClickDataset,
+    collate_fn_transformer_infer,
+    create_data_loaders,
+)
+from model import create_tabular_transformer_model
 
 
 def predict(model, test_loader, device):
@@ -113,38 +118,25 @@ def load_trained_model(feature_processor, CFG, model_path, device):
     
     return model
 
-def run_inference(model, test_data, feature_cols, seq_col, batch_size, CFG, device, feature_processor):
-    """추론 실행 함수"""
-    # FeatureProcessor가 제공되지 않은 경우 에러 발생
-    if feature_processor is None:
-        raise ValueError("❌ FeatureProcessor가 제공되지 않았습니다. predict_test_data에서 생성된 FeatureProcessor를 사용해야 합니다.")
+def predict_test_data(test_data, feature_cols, seq_col, target_col, CFG, model_path, device):
+    # create_data_loaders를 사용하여 FeatureProcessor 및 테스트 로더 생성
+    print("🔧 create_data_loaders를 사용하여 FeatureProcessor 및 테스트 로더 생성...")
+    _, _, test_loader, _, _, feature_processor = create_data_loaders(
+        train_df=None,
+        val_df=None,
+        test_df=test_data,
+        feature_cols=feature_cols,
+        seq_col=seq_col,
+        target_col=target_col,
+        batch_size=CFG['BATCH_SIZE'],
+        config=CFG
+    )
     
-    print("✅ 제공된 FeatureProcessor를 사용합니다.")
-    
-    test_dataset = ClickDataset(test_data, feature_processor, has_target=False, has_id=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_transformer_infer)
-    
-    # 예측 수행
-    prediction_result = predict(model, test_loader, device)
-    
-    return prediction_result
-
-
-def predict_test_data(test_data, feature_cols, seq_col, CFG, model_path, device, feature_processor):
     # 모델 로드
     model = load_trained_model(feature_processor, CFG, model_path, device)
     
-    # 예측 수행
-    prediction_result = run_inference(
-        model=model,
-        test_data=test_data,
-        feature_cols=feature_cols,
-        seq_col=seq_col,
-        batch_size=CFG['BATCH_SIZE'],
-        CFG=CFG,
-        device=device,
-        feature_processor=feature_processor
-    )
+    # 예측 수행 (test_loader 직접 사용)
+    prediction_result = predict(model, test_loader, device)
     
     # 제출 파일 생성 (임시 파일로 저장)
     import tempfile

@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
 
-__all__ = [
-    "create_tabular_transformer_model"
-    ]
+__all__ = ["create_tabular_transformer_model"]
 
 
 

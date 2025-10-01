@@ -1,20 +1,30 @@
 import os
-import torch
-import torch.nn as nn
-import numpy as np
-from sklearn.model_selection import train_test_split
-from tqdm import tqdm
 from datetime import datetime
 
-# from main import CFG, device, initialize
+import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+
 from data_loader import create_data_loaders
-from model import create_tabular_transformer_model
 from early_stopping import create_early_stopping_from_config
-from metrics import evaluate_model, print_metrics, save_training_logs, get_best_checkpoint_info
 from gradient_norm import (
-    calculate_gradient_norms, print_gradient_norms, save_gradient_norm_logs,
-    analyze_gradient_behavior, print_gradient_analysis, check_gradient_issues, print_gradient_issues
+    analyze_gradient_behavior,
+    calculate_gradient_norms,
+    check_gradient_issues,
+    print_gradient_analysis,
+    print_gradient_issues,
+    print_gradient_norms,
+    save_gradient_norm_logs,
 )
+from metrics import (
+    evaluate_model,
+    get_best_checkpoint_info,
+    print_metrics,
+    save_training_logs,
+)
+from model import create_tabular_transformer_model
 
 def print_model_summary(model, log_file_path=None):
     """모델의 상세 구조를 출력하고 로그 파일에 저장"""
@@ -86,7 +96,21 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     """모델 훈련 함수"""
     
     # 1) split
-    tr_df, va_df = train_test_split(train_df, test_size=CFG['VAL_SPLIT'], random_state=42, shuffle=True)
+    tr_df, va_df = train_test_split(train_df, test_size=CFG['VAL_SPLIT'], random_state=42, shuffle=True, stratify=train_df['clicked'])
+    
+    # Stratified split 결과 확인
+    print("📊 Stratified Split 결과:")
+    print(f"   • 전체 데이터: {len(train_df):,}개 (clicked=0: {len(train_df[train_df['clicked']==0]):,}개, clicked=1: {len(train_df[train_df['clicked']==1]):,}개)")
+    print(f"   • 훈련 데이터: {len(tr_df):,}개 (clicked=0: {len(tr_df[tr_df['clicked']==0]):,}개, clicked=1: {len(tr_df[tr_df['clicked']==1]):,}개)")
+    print(f"   • 검증 데이터: {len(va_df):,}개 (clicked=0: {len(va_df[va_df['clicked']==0]):,}개, clicked=1: {len(va_df[va_df['clicked']==1]):,}개)")
+    
+    # 클래스 비율 확인
+    train_ratio_0 = len(tr_df[tr_df['clicked']==0]) / len(tr_df)
+    train_ratio_1 = len(tr_df[tr_df['clicked']==1]) / len(tr_df)
+    val_ratio_0 = len(va_df[va_df['clicked']==0]) / len(va_df)
+    val_ratio_1 = len(va_df[va_df['clicked']==1]) / len(va_df)
+    print(f"   • 훈련 데이터 클래스 비율: clicked=0 ({train_ratio_0:.3f}), clicked=1 ({train_ratio_1:.3f})")
+    print(f"   • 검증 데이터 클래스 비율: clicked=0 ({val_ratio_0:.3f}), clicked=1 ({val_ratio_1:.3f})")
 
     # 2) Dataset / Loader
     train_loader, val_loader, _, train_dataset, val_dataset, feature_processor = create_data_loaders(

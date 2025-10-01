@@ -6,11 +6,11 @@
 """
 
 import os
+
 import numpy as np
 import pandas as pd
-from sklearn.metrics import average_precision_score, log_loss
 import torch
-import torch.nn.functional as F
+from sklearn.metrics import average_precision_score, log_loss
 
 
 def calculate_ap(y_true, y_pred):

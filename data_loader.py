@@ -1,12 +1,13 @@
-import pandas as pd
+import json
+import os
+from typing import Dict, List, Optional, Tuple, Union
+
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import json
 import yaml
-import os
-from typing import Dict, List, Tuple, Optional, Union
+from torch.utils.data import DataLoader, Dataset
 
 class FeatureProcessor:
     """피처 전처리 클래스"""
@@ -296,7 +297,6 @@ def create_data_loaders(train_df, val_df, test_df, feature_cols, seq_col, target
     
     return train_loader, val_loader, test_loader, train_dataset, val_dataset, feature_processor
 
-def load_and_preprocess_data(CFG):
     """데이터 로드 및 전처리 함수"""
     def safe_load_parquet(file_path):
         """안전한 parquet 로드 함수 - 항상 전체 데이터 로드"""
