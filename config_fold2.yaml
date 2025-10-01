@@ -17,7 +17,7 @@ VAL_SPLIT: 0.2
 EARLY_STOPPING:
   ENABLED: true          # Early stopping 사용 여부
   PATIENCE: 5            # 개선이 없는 에포크 수 (patience) - 테스트용
-  MIN_DELTA: 0.00001       # 개선으로 인정할 최소 변화량
+  MIN_DELTA: 0.0001       # 개선으로 인정할 최소 변화량
   MONITOR: "val_score"   # 모니터링할 메트릭 (val_loss, val_score 등)
   MODE: "max"           # 모니터링 모드 (min: 감소, max: 증가)
   RESTORE_BEST_WEIGHTS: true  # 최고 성능 가중치 복원 여부
