@@ -7,7 +7,7 @@
 ## ⚡ 빠른 시작
 
 ```bash
-# 0) 채널/우선순위 설정 (1회만)
+# 채널/우선순위
 conda config --add channels rapidsai
 conda config --add channels conda-forge
 conda config --add channels nvidia
@@ -15,19 +15,18 @@ conda config --add channels defaults
 conda config --set channel_priority flexible
 conda clean -i -y
 
-# 1) 일반 파이썬 패키지 (conda)
+# 일반 패키지
 conda install -y -c conda-forge pandas numpy scikit-learn pyyaml tqdm psutil pyarrow xgboost
 
-# 2) RAPIDS 계열 (conda)  — CUDA 12.0 가정, Linux x86_64
+# RAPIDS (CUDA 12.x용 최신 계열 예: 25.08)
 conda install -y -c rapidsai -c conda-forge -c nvidia -c defaults \
-  cudf=23.10 dask-cudf=23.10 dask-cuda=23.10 cupy=13.6
+  cudf=25.08 dask-cudf=25.08 dask-cuda=25.08 cupy
 
-# 3) NVTabular (pip) — 권장 고정
-python -m pip install nvtabular==23.08.00
+python -m pip install nvtabular   # 최신 릴리스 사용 권장
 
-# 4) PyTorch (pip, CUDA 12.4 번들 휠) — RAPIDS와 충돌 최소화
-python -m pip install --index-url https://download.pytorch.org/whl/cu124 \
-  torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+python -m pip install cudf-cu12 dask-cudf-cu12
+# 필요시 cupy도 pip로
+python -m pip install cupy-cuda12x
 ```
 
 ## 🚀 주요 특징
