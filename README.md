@@ -1,12 +1,14 @@
 # Toss Click Prediction Project
 
-딥러닝을 이용한 클릭 예측 프로젝트입니다. **TabularSeq 모델**과 **TabularTransformer 모델**을 지원합니다.
+딥러닝을 이용한 클릭 예측 프로젝트입니다. **TabularSeq 모델**, **TabularTransformer 모델**, **XGBoost 모델**을 지원합니다.
 
 ## 🚀 주요 특징
 
-- ✅ **두 가지 모델 지원**: TabularSeq (기존) + TabularTransformer (신규)
+- ✅ **세 가지 모델 지원**: TabularSeq (기존) + TabularTransformer (신규) + XGBoost (신규)
+- ✅ **NVIDIA Merlin 통합**: 고성능 테이블 데이터 처리 및 GPU 가속
 - ✅ **고급 피처 처리**: 범주형/수치형/시퀀스 피처 분리 처리
 - ✅ **Transformer 아키텍처**: FT-Transformer 기반 테이블 데이터 모델
+- ✅ **XGBoost 모델**: 시퀀스 피처를 제외한 범주형/수치형 피처만 사용
 - ✅ **누락값 처리**: NaN 토큰을 통한 학습 가능한 누락값 처리
 - ✅ **메모리 효율적**: 대용량 데이터 샘플링 및 청크 처리
 - ✅ **완전 자동화**: 훈련 → 예측 → 결과 저장 원클릭 실행
@@ -22,8 +24,15 @@
 ├── train.py                  # 모델 훈련 (모델별 분기 + 전처리된 데이터)
 ├── predict.py                # 예측 및 제출 (모델별 분기)
 ├── train_and_predict.py      # 🆕 원클릭 훈련+예측 워크플로우
+├── train_and_predict_xgboost.py  # 🆕 XGBoost 전용 훈련+예측 워크플로우
+├── train_and_predict_merlin.py  # 🆕 NVIDIA Merlin 기반 고성능 워크플로우
+├── data_loader_merlin.py     # 🆕 NVIDIA Merlin 기반 고성능 데이터로더
+├── test_merlin_dataloader.py # 🆕 Merlin 데이터로더 테스트 스크립트
 ├── dataset_split.py          # 🆕 10-fold 데이터 분할 (feat_e_3 기준)
 ├── preprocess_train_data.py  # 🆕 훈련 데이터 전처리 및 텐서 저장
+├── xgboost_model.py          # 🆕 XGBoost 모델 클래스
+├── config_xgboost.yaml       # 🆕 XGBoost 설정 파일
+├── test_xgboost.py           # 🆕 XGBoost 모델 테스트 스크립트
 ├── metrics.py                # 평가 메트릭 (AP, WLL, Score)
 ├── early_stopping.py         # 조기 종료 기능
 ├── gradient_norm.py          # 그래디언트 모니터링
@@ -227,17 +236,27 @@ python preprocess_train_data.py
 
 #### 원클릭 실행 (추천)
 ```bash
-# 전처리된 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
+# TabularSeq/TabularTransformer 모델: 전처리된 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
 python train_and_predict.py
+
+# XGBoost 모델: 전체 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
+python train_and_predict_xgboost.py --config config_xgboost.yaml
+
+# NVIDIA Merlin 기반 고성능 모델: GPU 가속으로 훈련 → 예측 → 결과 저장을 한 번에 실행
+python train_and_predict_merlin.py --config config_fold1.yaml --use-merlin --model-type transformer
 ```
 
 #### 단계별 실행
 ```bash
-# 전처리된 데이터로 훈련
+# TabularSeq/TabularTransformer 모델
 python train.py
-
-# 예측 및 제출 파일 생성
 python predict.py
+
+# XGBoost 모델 테스트
+python test_xgboost.py
+
+# NVIDIA Merlin 데이터로더 테스트
+python test_merlin_dataloader.py
 ```
 
 ### 3. 전처리된 데이터 사용
@@ -250,6 +269,7 @@ python predict.py
 
 ### 3. 모델 선택
 
+#### TabularSeq/TabularTransformer 모델
 `config.yaml`에서 모델 타입을 선택할 수 있습니다:
 
 ```yaml
@@ -272,6 +292,25 @@ MODEL:
     RESIDUAL_DROPOUT: 0.0
 ```
 
+#### XGBoost 모델
+`config_xgboost.yaml`에서 XGBoost 모델을 설정할 수 있습니다:
+
+```yaml
+MODEL:
+  XGBOOST:
+    N_ESTIMATORS: 1000        # 부스팅 라운드 수
+    MAX_DEPTH: 6              # 트리의 최대 깊이
+    LEARNING_RATE: 0.1        # 학습률
+    SUBSAMPLE: 0.8            # 샘플링 비율
+    COLSAMPLE_BYTREE: 0.8     # 피처 샘플링 비율
+    REG_ALPHA: 0.1            # L1 정규화
+    REG_LAMBDA: 1.0           # L2 정규화
+    RANDOM_STATE: 42          # 랜덤 시드
+    N_JOBS: -1                # 병렬 처리 스레드 수
+    EARLY_STOPPING_ROUNDS: 50 # 조기 종료 라운드
+    EVAL_METRIC: "rmse"       # 평가 메트릭
+```
+
 ## 🧠 모델 아키텍처
 
 ### TabularSeq 모델 (기존)
@@ -289,6 +328,27 @@ MODEL:
   - 누락값: 학습 가능한 NaN 토큰
   - Column Embeddings + Class Token
   - 3-layer Transformer (192 dim, 8 heads)
+
+### XGBoost 모델 (신규)
+- **구조**: Gradient Boosting Machine
+- **입력**: 범주형 + 수치형 피처 (시퀀스 피처 제외)
+- **특징**: 
+  - 범주형 피처: Label Encoding
+  - 수치형 피처: 원본 값 사용
+  - 시퀀스 피처: 사용하지 않음
+  - 조기 종료: 내장 early stopping 사용
+  - 병렬 처리: 멀티스레드 지원
+
+### NVIDIA Merlin 통합 (신규)
+- **구조**: GPU 가속 테이블 데이터 처리 파이프라인
+- **입력**: 범주형 + 수치형 + 시퀀스 피처 (GPU에서 처리)
+- **특징**: 
+  - GPU 메모리 최적화: cuDF 기반 데이터 처리
+  - 고성능 피처 엔지니어링: Merlin 워크플로우
+  - 자동 데이터 타입 최적화: GPU 친화적 데이터 변환
+  - 병렬 처리: 멀티 GPU 지원
+  - 메모리 효율성: 대용량 데이터 청크 처리
+  - 호환성: Merlin 미설치 시 표준 PyTorch로 자동 전환
 
 ## 📊 데이터 처리
 
