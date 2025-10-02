@@ -27,13 +27,11 @@ def predict(model, test_loader, device):
             x_numerical = batch.get('x_numerical').to(device)
             seqs = batch.get('seqs').to(device)
             seq_lengths = batch.get('seq_lengths').to(device)
-            nan_mask = batch.get('nan_mask').to(device)
             logits = model(
                 x_categorical=x_categorical,
                 x_numerical=x_numerical,
                 x_seq=seqs,
-                seq_lengths=seq_lengths,
-                nan_mask=nan_mask
+                seq_lengths=seq_lengths
             )
             
             probs = torch.sigmoid(logits)

@@ -124,13 +124,11 @@ def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transf
             x_numerical = batch.get('x_numerical').to(device)
             seqs = batch.get('seqs').to(device)
             seq_lens = batch.get('seq_lengths').to(device)
-            nan_mask = batch.get('nan_mask').to(device)
             logits = model(
                 x_categorical=x_categorical,
                 x_numerical=x_numerical,
                 x_seq=seqs,
-                seq_lengths=seq_lens,
-                nan_mask=nan_mask
+                seq_lengths=seq_lens
             )
             probs = torch.sigmoid(logits)
             

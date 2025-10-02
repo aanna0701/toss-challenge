@@ -108,32 +108,7 @@ class FeatureProcessor:
         else:
             raise ValueError(f"❌ 시퀀스 피처 '{self.sequential_feature}'가 데이터에 없습니다!")
         
-        # NaN 마스크 생성 (범주형 + 수치형 + 시퀀스 순서)
-        nan_mask = []
-        
-        # 범주형 피처 NaN 마스크
-        for feat in self.categorical_features:
-            if feat in df.columns:
-                nan_mask.append(df[feat].isna().astype(int).values)
-            else:
-                nan_mask.append(np.ones(batch_size, dtype=int))
-        
-        # 수치형 피처 NaN 마스크
-        for feat in self.numerical_features:
-            if feat in df.columns:
-                nan_mask.append(df[feat].isna().astype(int).values)
-            else:
-                nan_mask.append(np.ones(batch_size, dtype=int))
-        
-        # 시퀀스 피처 NaN 마스크
-        if self.sequential_feature in df.columns:
-            nan_mask.append(df[self.sequential_feature].isna().astype(int).values)
-        else:
-            nan_mask.append(np.ones(batch_size, dtype=int))
-        
-        nan_mask = torch.tensor(np.column_stack(nan_mask), dtype=torch.float32)
-        
-        return x_categorical, x_numerical, sequences, nan_mask
+        return x_categorical, x_numerical, sequences
 
 
 class ClickDataset(Dataset):
@@ -145,7 +120,7 @@ class ClickDataset(Dataset):
         self.has_id = has_id
 
         # 피처 처리
-        self.x_categorical, self.x_numerical, self.sequences, self.nan_mask = feature_processor.transform(df)
+        self.x_categorical, self.x_numerical, self.sequences = feature_processor.transform(df)
 
         if self.has_target:
             self.y = self.df[self.target_col].astype(np.float32).values
@@ -158,8 +133,7 @@ class ClickDataset(Dataset):
         item = {
             'x_categorical': self.x_categorical[idx],
             'x_numerical': self.x_numerical[idx],
-            'seq': self.sequences[idx],
-            'nan_mask': self.nan_mask[idx]
+            'seq': self.sequences[idx]
         }
         
         # ID가 필요한 경우에만 처리
@@ -182,13 +156,11 @@ def collate_fn_transformer_train(batch):
     x_categorical = [item['x_categorical'] for item in batch]
     x_numerical = [item['x_numerical'] for item in batch]
     seqs = [item['seq'] for item in batch]
-    nan_masks = [item['nan_mask'] for item in batch]
     ys = [item['y'] for item in batch]  # has_target=True인 경우만
     
     # 스택으로 변환
     x_categorical = torch.stack(x_categorical)
     x_numerical = torch.stack(x_numerical)
-    nan_masks = torch.stack(nan_masks)
     ys = torch.stack(ys)
     
     # 시퀀스 패딩
@@ -202,7 +174,6 @@ def collate_fn_transformer_train(batch):
         'x_numerical': x_numerical,
         'seqs': seqs_padded,
         'seq_lengths': seq_lengths,
-        'nan_mask': nan_masks,
         'ys': ys
     }
 
@@ -212,7 +183,6 @@ def collate_fn_transformer_infer(batch):
     x_categorical = [item['x_categorical'] for item in batch]
     x_numerical = [item['x_numerical'] for item in batch]
     seqs = [item['seq'] for item in batch]
-    nan_masks = [item['nan_mask'] for item in batch]
     
     # 예측 시에는 ID가 반드시 필요
     if 'id' not in batch[0]:
@@ -227,7 +197,6 @@ def collate_fn_transformer_infer(batch):
     # 스택으로 변환
     x_categorical = torch.stack(x_categorical)
     x_numerical = torch.stack(x_numerical)
-    nan_masks = torch.stack(nan_masks)
     
     # 시퀀스 패딩
     seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
@@ -240,7 +209,6 @@ def collate_fn_transformer_infer(batch):
         'x_numerical': x_numerical,
         'seqs': seqs_padded,
         'seq_lengths': seq_lengths,
-        'nan_mask': nan_masks,
         'ids': ids
     }
     

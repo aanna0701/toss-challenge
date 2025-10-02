@@ -163,7 +163,6 @@ def print_model_summary(model, log_file_path=None, input_size=None):
                 (1, 20),  # x_numerical: (batch_size, num_numerical_features)  
                 (1, 50),  # x_seq: (batch_size, seq_length)
                 (1,),     # seq_lengths: (batch_size,)
-                (1, 31)   # nan_mask: (batch_size, total_features)
             ]
         
         # torchinfo로 모델 요약 생성

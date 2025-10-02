@@ -62,9 +62,6 @@ class TabularTransformerModel(nn.Module):
         # Class token
         self.class_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         
-        # NaN token for missing values
-        self.nan_token = nn.Parameter(torch.zeros(1, hidden_dim))
-        
         # Transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
@@ -109,7 +106,7 @@ class TabularTransformerModel(nn.Module):
             elif isinstance(module, nn.Parameter):
                 nn.init.trunc_normal_(module, std=0.02)
                 
-    def forward(self, x_categorical=None, x_numerical=None, x_seq=None, seq_lengths=None, nan_mask=None):
+    def forward(self, x_categorical=None, x_numerical=None, x_seq=None, seq_lengths=None):
         batch_size = None
         features = []
         feature_idx = 0
@@ -157,17 +154,8 @@ class TabularTransformerModel(nn.Module):
         # Stack features: (B, num_features, hidden_dim)
         x = torch.stack(features, dim=1)
         
-        # Add column embeddings BEFORE missing value masking
+        # Add column embeddings
         x = x + self.column_embeddings.unsqueeze(0)
-
-        # Handle missing values AFTER column embeddings
-        if nan_mask is not None:
-            # Create NaN token without column embeddings (just the base NaN token)
-            nan_tokens = self.nan_token.expand(batch_size, len(features), -1)
-            
-            # Apply missing value masking
-            missing_masks = nan_mask.bool().unsqueeze(-1)  # (B, num_features, 1)
-            x = torch.where(missing_masks, nan_tokens, x)
         
         # Add class token
         class_tokens = self.class_token.expand(batch_size, -1, -1)  # (B, 1, hidden_dim)

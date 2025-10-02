@@ -178,7 +178,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     weight_decay_params = []
     no_decay_params = []
 
-    no_decay_keys = ['class_token', 'column_embeddings', 'nan_token', 'bias', 'norm', 'ln', 'embedding']
+    no_decay_keys = ['class_token', 'column_embeddings', 'bias', 'norm', 'ln', 'embedding']
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -295,14 +295,12 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             x_numerical = batch.get('x_numerical').to(device)
             seqs = batch.get('seqs').to(device)
             seq_lens = batch.get('seq_lengths').to(device)
-            nan_mask = batch.get('nan_mask').to(device)
             ys = batch.get('ys').to(device)
             logits = model(
                 x_categorical=x_categorical,
                 x_numerical=x_numerical,
                 x_seq=seqs,
-                seq_lengths=seq_lens,
-                nan_mask=nan_mask
+                seq_lengths=seq_lens
             )
             
             loss = criterion(logits, ys)
