@@ -1,8 +1,8 @@
 import os
 from datetime import datetime
 
-import numpy as np
 import torch
+import torch.optim as optim
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -17,17 +17,12 @@ from early_stopping import create_early_stopping_from_config
 from gradient_norm import (
     analyze_gradient_behavior,
     calculate_gradient_norms,
-    check_gradient_issues,
     print_gradient_analysis,
-    print_gradient_issues,
-    print_gradient_norms,
     save_gradient_norm_logs,
 )
 from metrics import (
     evaluate_model,
-    get_best_checkpoint_info,
     print_metrics,
-    save_training_logs,
 )
 from model import create_tabular_transformer_model
 
@@ -233,7 +228,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         
         # CSV 파일 헤더 작성
         with open(train_log_path, 'w', encoding='utf-8') as f:
-            f.write("step,epoch,batch_idx,train_loss,learning_rate,warmup_factor,val_loss,val_ap,val_wll,val_score\n")
+            f.write("step,epoch,batch_idx,train_loss,learning_rate,grad_norm_lstm,grad_norm_model,val_loss,val_ap,val_wll,val_score\n")
         
         print(f"📊 상세 로그 파일 생성 (CSV): {train_log_path}")
     
@@ -256,7 +251,13 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         print(f"   • 측정 구성 요소: {gradient_components}")
         print(f"   • 로그 저장: {CFG['GRADIENT_NORM']['SAVE_LOGS']}")
 
+    
     # 4) Training Loop with Step-based Logging
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, 
+        milestones=[5, 10, 15],
+        gamma=0.5           # 각 milestone에서 lr * 0.5
+    )
     global_step = 0
     steps_per_epoch = len(train_loader)
     total_steps = CFG['EPOCHS'] * steps_per_epoch
@@ -271,7 +272,6 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         # 훈련 단계
         model.train()
         epoch_train_loss = 0.0
-        epoch_gradient_norms = []
         
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train Epoch {epoch}")):
             global_step += 1
@@ -307,16 +307,14 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             loss.backward()
             
             # Gradient norm 측정 (backward 후, step 전)
-            if gradient_norm_enabled:
+            if gradient_norm_enabled and global_step % 50 == 0:
                 gradient_norms = calculate_gradient_norms(model, gradient_components)
-                epoch_gradient_norms.append(gradient_norms)
             
             optimizer.step()
             epoch_train_loss += loss.item() * ys.size(0)
             
             # 스텝별 로깅 (10 스텝마다 저장)
             current_lr = optimizer.param_groups[0]['lr']
-            warmup_factor = global_step / warmup_steps if warmup_enabled and global_step <= warmup_steps else 1.0
             
             # 10 스텝마다 로그 저장
             if global_step % 50 == 0:
@@ -326,15 +324,13 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
                     'batch_idx': batch_idx,
                     'train_loss': loss.item(),
                     'learning_rate': current_lr,
-                    'warmup_factor': warmup_factor
+                    'gradient_norms': gradient_norms
                 }                
                 # 실시간으로 CSV 파일에 기록
                 if train_log_path:
                     with open(train_log_path, 'a', encoding='utf-8') as f:
-                        f.write(f"{log_entry['step']},{log_entry['epoch']},{log_entry['batch_idx']},{log_entry['train_loss']:.6f},{log_entry['learning_rate']:.8f},{log_entry['warmup_factor']:.3f},,,,\n")
-            
-            # 스텝별 출력 (매 100 스텝마다)
-            if global_step % 50 == 0:
+                        f.write(f"{log_entry['step']},{log_entry['epoch']},{log_entry['batch_idx']},{log_entry['train_loss']:.6f},{log_entry['learning_rate']:.8f},{log_entry['gradient_norms']['lstm']:.6f},{log_entry['gradient_norms']['model']:.6f},,,,\n")
+
                 print(f"[Step {global_step}] Epoch {epoch}/{CFG['EPOCHS']}, Batch {batch_idx+1}/{steps_per_epoch}")
                 print(f"   • Train Loss: {loss.item():.4f}")
                 print(f"   • Learning Rate: {current_lr:.6f}")
@@ -342,20 +338,6 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
                     print(f"   • Warmup Progress: {global_step}/{warmup_steps} ({global_step/warmup_steps*100:.1f}%)")
         
         epoch_train_loss /= len(train_dataset)
-        
-        # 에포크별 평균 gradient norm 계산
-        if gradient_norm_enabled and epoch_gradient_norms:
-            avg_gradient_norms = {}
-            for component in gradient_components:
-                component_norms = [gn[component] for gn in epoch_gradient_norms if component in gn]
-                avg_gradient_norms[f'{component}_grad_norm'] = np.mean(component_norms) if component_norms else 0.0
-            
-            # Gradient norm 로그 저장
-            gradient_log_entry = {
-                'epoch': epoch,
-                **avg_gradient_norms
-            }
-            gradient_norm_logs.append(gradient_log_entry)
 
         # 검증 단계 및 메트릭 계산
         val_metrics = evaluate_model(model, val_loader, device, "tabular_transformer")
@@ -366,26 +348,15 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         print(f"   • Current LR: {optimizer.param_groups[0]['lr']:.6f}")
         print_metrics(val_metrics, "Val ")
         
-        epoch_log_entry = {
-            'step': global_step,
-            'epoch': epoch,
-            'epoch_train_loss': epoch_train_loss,
-            'val_loss': val_metrics['loss'],
-            'val_ap': val_metrics['ap'],
-            'val_wll': val_metrics['wll'],
-            'val_score': val_metrics['score'],
-            'learning_rate': optimizer.param_groups[0]['lr']
-        }
-        
         # 상세 로그 파일에 에포크별 검증 결과 기록 (매 에폭마다)
         if train_log_path:
             # 검증 결과만 추가 (스텝별 로그는 이미 실시간으로 기록됨)
             with open(train_log_path, 'a', encoding='utf-8') as f:
-                f.write(f"{global_step},{epoch},-1,{epoch_train_loss:.6f},{optimizer.param_groups[0]['lr']:.8f},1.0,{val_metrics['loss']:.6f},{val_metrics['ap']:.6f},{val_metrics['wll']:.6f},{val_metrics['score']:.6f}\n")
+                f.write(f"{global_step},{epoch},-1,{epoch_train_loss:.6f},{optimizer.param_groups[0]['lr']:.8f},,,{val_metrics['loss']:.6f},{val_metrics['ap']:.6f},{val_metrics['wll']:.6f},{val_metrics['score']:.6f}\n")
     
-        # 5 epoch마다 checkpoint 저장
-        if epoch % 5 == 0:
-            save_checkpoint(model, epoch, optimizer, epoch_train_loss, val_metrics, checkpoint_dir, CFG=CFG)
+        # # 5 epoch마다 checkpoint 저장
+        # if epoch % 5 == 0:
+        #     save_checkpoint(model, epoch, optimizer, epoch_train_loss, val_metrics, checkpoint_dir, CFG=CFG)
         
         # Early Stopping 체크 (Score 기준)
         monitor_value = val_metrics[CFG['EARLY_STOPPING']['MONITOR'].replace('val_', '')]
@@ -395,7 +366,15 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
                 # 조기 종료 시에도 checkpoint 저장
                 save_checkpoint(model, epoch, optimizer, epoch_train_loss, val_metrics, checkpoint_dir, CFG=CFG)
                 break
-
+        
+        # Step decay
+        current_lr = optimizer.param_groups[0]['lr']
+        scheduler.step()
+        new_lr = optimizer.param_groups[0]['lr']
+        
+        if current_lr != new_lr:
+            print(f"📉 Epoch {epoch}: Learning Rate 변경 {current_lr:.6f} → {new_lr:.6f}")
+    
     # 최종 결과 출력
     if early_stopping:
         best_score = early_stopping.get_best_score()
@@ -458,7 +437,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
 
     return model, feature_processor
 
-def save_model(model, path, feature_processor):
+def save_model(model, path):
     """모델 저장 함수"""
     torch.save(model.state_dict(), path)
     print(f"Model saved to {path}")

@@ -11,6 +11,7 @@ import os
 import psutil
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 import yaml
 
@@ -19,6 +20,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='훈련 및 예측 워크플로우 실행')
     parser.add_argument('--config', type=str, required=True,
                        help='설정 파일 경로 (필수)')
+    parser.add_argument('--result_dir', type=str, required=True,)
     return parser.parse_args()
 
 def load_config(config_path):
@@ -44,22 +46,18 @@ from predict import predict_test_data
 
 DEVICE = get_device()
 
-def create_results_directory():
+def create_results_directory(args):
     """결과 저장 디렉토리 생성"""
     # 훈련 데이터 경로에서 fold 정보 추출
-    train_data_path = CFG['PATHS']['TRAIN_DATA']
+    fold_path = Path(CFG["PATHS"]["TRAIN_DATA"]).stem
+    train_data_path = args.result_dir
     
     # train_fold1.parquet -> fold1, train_fold2.parquet -> fold2
-    if 'train_fold' in train_data_path:
-        fold_match = os.path.basename(train_data_path).replace('train_fold', '').replace('.parquet', '')
-        fold_name = f"fold{fold_match}"
-    else:
-        fold_name = "full_data"
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fold_match = os.path.basename(fold_path).replace('train_fold', '')
+    fold_name = f"fold{fold_match}"
     
     # {timestamp}/{fold}/ 구조로 디렉토리 생성
-    results_dir = os.path.join(timestamp, fold_name)
+    results_dir = os.path.join(train_data_path, fold_name)
     
     # 기존 디렉토리가 있으면 삭제하고 새로 생성
     if os.path.exists(results_dir):
@@ -353,7 +351,7 @@ def main():
     
     # 2. 결과 디렉토리 생성
     print_progress(2, total_steps, "결과 디렉토리 생성")
-    results_dir = create_results_directory()
+    results_dir = create_results_directory(args)
     
     # 에러 로깅 설정
     error_log_path = setup_error_logging(results_dir)
@@ -411,7 +409,7 @@ def main():
         
         # 6. 임시 웨이트 파일 저장
         print_progress(5, total_steps, "임시 웨이트 파일 저장")
-        save_model(model, temp_model_path, feature_processor)
+        save_model(model, temp_model_path)
         
         # Best checkpoint 경로 설정
         best_model_path = os.path.join(results_dir, "best.pth")
@@ -483,9 +481,7 @@ def main():
         
         submission_df = predict_test_data(
             test_data=test_data,
-            feature_cols=feature_cols,
-            seq_col=seq_col,
-            target_col=target_col,
+            feature_processor=feature_processor,
             CFG=CFG,
             model_path=model_path_for_prediction,
             device=DEVICE

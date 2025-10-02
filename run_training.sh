@@ -5,9 +5,10 @@ set -euo pipefail
 STUDIO_NAME="fun-tan-2pfe"
 TEAMSPACE="TOSS-challenge"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"/toss
+DATE_TIME="results/$(date +"%Y%m%d_%H%M%S")"
 
 # Config 파일들 설정 (순차적으로 실행)
-CONFIG_FILES=("config_fold1.yaml" "config_fold2.yaml")
+CONFIG_FILES=("config_fold1.yaml")
 
 echo "📋 실행할 설정 파일들:"
 for config in "${CONFIG_FILES[@]}"; do
@@ -66,7 +67,7 @@ for i in "${!CONFIG_FILES[@]}"; do
     echo "🔄 [$CONFIG_NUM/$TOTAL_CONFIGS] 설정 파일 실행: $CONFIG_FILE"
     echo "=================================="
     
-    if python train_and_predict.py --config "$CONFIG_FILE"; then
+    if python train_and_predict.py --config "$CONFIG_FILE" --result_dir "$DATE_TIME"; then
         echo ""
         echo "✅ [$CONFIG_NUM/$TOTAL_CONFIGS] $CONFIG_FILE 훈련 성공!"
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
