@@ -43,10 +43,10 @@ MODEL:
   TRANSFORMER:
     HIDDEN_DIM: 32           # Transformer hidden dimension
     N_HEADS: 4                # Number of attention heads
-    N_LAYERS: 8               # Number of transformer layers
+    N_LAYERS: 3               # Number of transformer layers
     FFN_SIZE_FACTOR: 1.333    # FFN size factor (4/3)
-    ATTENTION_DROPOUT: 0.0    # Attention dropout rate
-    FFN_DROPOUT: 0.0          # FFN dropout rate
+    ATTENTION_DROPOUT: 0.2    # Attention dropout rate
+    FFN_DROPOUT: 0.1          # FFN dropout rate
     RESIDUAL_DROPOUT: 0.0     # Residual dropout rate
     
   # 피처 분류 설정 (chunk_eda_results.json 기반)

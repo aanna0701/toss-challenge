@@ -2,6 +2,34 @@
 
 딥러닝을 이용한 클릭 예측 프로젝트입니다. **TabularSeq 모델**, **TabularTransformer 모델**, **XGBoost 모델**을 지원합니다.
 
+> **📅 최근 업데이트 (2025-01-02)**: 콘다 설치 가이드 추가, 의존성 충돌 해결 방법 개선, 설치 확인 스크립트 추가
+
+## ⚡ 빠른 시작
+
+```bash
+# 0) 채널/우선순위 설정 (1회만)
+conda config --add channels rapidsai
+conda config --add channels conda-forge
+conda config --add channels nvidia
+conda config --add channels defaults
+conda config --set channel_priority flexible
+conda clean -i -y
+
+# 1) 일반 파이썬 패키지 (conda)
+conda install -y -c conda-forge pandas numpy scikit-learn pyyaml tqdm psutil pyarrow xgboost
+
+# 2) RAPIDS 계열 (conda)  — CUDA 12.0 가정, Linux x86_64
+conda install -y -c rapidsai -c conda-forge -c nvidia -c defaults \
+  cudf=23.10 dask-cudf=23.10 dask-cuda=23.10 cupy=13.6
+
+# 3) NVTabular (pip) — 권장 고정
+python -m pip install nvtabular==23.08.00
+
+# 4) PyTorch (pip, CUDA 12.4 번들 휠) — RAPIDS와 충돌 최소화
+python -m pip install --index-url https://download.pytorch.org/whl/cu124 \
+  torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+```
+
 ## 🚀 주요 특징
 
 - ✅ **세 가지 모델 지원**: TabularSeq (기존) + TabularTransformer (신규) + XGBoost (신규)
@@ -64,6 +92,8 @@
 │       └── feature_quality_analysis.json  # 피처 품질 분석
 ├── requirements.txt          # Pip 패키지 목록
 ├── environment-cpu.yml       # Conda 환경 (CPU)
+├── environment.yml          # Conda 환경 (GPU 지원)
+├── conda_install_commands.txt # 콘다 설치 명령어 모음
 ├── setup_env.sh              # 환경 설정 스크립트 (Linux/macOS)
 ├── setup_env.bat             # 환경 설정 스크립트 (Windows)
 └── README.md                 # 사용 가이드
@@ -71,7 +101,9 @@
 
 ## 🛠️ 설치
 
-### Option 1: Conda Environment (추천)
+### Option 1: Conda Environment (추천) ⭐
+
+콘다를 사용하면 의존성 충돌 없이 빠르고 안정적으로 설치할 수 있습니다.
 
 #### 자동 설정 (권장)
 ```bash
@@ -82,17 +114,71 @@
 setup_env.bat
 ```
 
-#### 수동 설정
+#### 수동 설정 - 기본 패키지들
+```bash
+# 기본 패키지들 (콘다로 설치)
+conda install -c conda-forge pandas=2.2.2 numpy=1.26.4 scikit-learn=1.4.2 pyyaml=6.0.2 tqdm=4.66.5 psutil=7.1.0 pyarrow=17.0.0 xgboost=2.1.3 -y
+
+# PyTorch 패키지들 (CUDA 지원)
+conda install pytorch=2.4.1 torchvision=0.19.1 torchaudio -c pytorch -c nvidia -y
+
+# NVIDIA 패키지들 (선택사항 - Merlin 기능용)
+conda install -c nvidia nvtabular=23.08.00
+conda install -c nvidia cudf=23.10.0
+conda install -c nvidia cupy=13.6.0
+
+# pip로만 설치 가능한 패키지들
+pip install torchinfo==1.8.0
+```
+
+#### 수동 설정 - 환경 파일 사용
 ```bash
 # CPU 전용 버전
 conda env create -f environment-cpu.yml
 conda activate toss-click-prediction-cpu
+
+# GPU 지원 버전 (NVIDIA 패키지 포함)
+conda env create -f environment.yml
+conda activate toss-env
 ```
 
-### Option 2: Pip
+### Option 2: Pip 설치
+
+#### 기본 설치 (권장)
 ```bash
+# 핵심 패키지들만 설치 (NVIDIA 패키지 제외)
 pip install -r requirements.txt
 ```
+
+#### NVIDIA 패키지 설치 (선택사항)
+NVIDIA Merlin 기능이 필요한 경우:
+```bash
+# requirements.txt에서 NVIDIA 패키지 주석 해제 후
+pip install --extra-index-url https://pypi.nvidia.com -r requirements.txt
+```
+
+### 📋 설치된 패키지 확인
+```bash
+python -c "
+import pandas; import numpy; import sklearn; import xgboost; import pyarrow
+print('✅ 기본 패키지들이 성공적으로 설치되었습니다!')
+print(f'Pandas: {pandas.__version__}')
+print(f'NumPy: {numpy.__version__}')
+print(f'Scikit-learn: {sklearn.__version__}')
+print(f'XGBoost: {xgboost.__version__}')
+print(f'PyArrow: {pyarrow.__version__}')
+"
+```
+
+### 🚀 설치 옵션별 특징
+
+| 설치 방법 | 속도 | 안정성 | GPU 지원 | 의존성 충돌 |
+|-----------|------|--------|----------|-------------|
+| **Conda** | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ |
+| **Pip (기본)** | ⭐⭐ | ⭐⭐ | ⭐⭐ | ⭐⭐ |
+| **Pip (NVIDIA)** | ⭐ | ⭐ | ⭐⭐⭐ | ⭐ |
+
+**권장사항**: 콘다를 사용하여 설치하면 의존성 충돌 없이 안정적인 환경을 구축할 수 있습니다.
 
 ## 📊 데이터 준비
 
@@ -451,6 +537,72 @@ GRADIENT_NORM:
 2. **GPU 사용**: Transformer 모델은 GPU에서 더 효율적
 3. **피처 분류**: `chunk_eda_results.json` 기반으로 자동 분류
 4. **정규화 통계**: `normalization_stats.json` 필요 (자동 생성)
+
+## 🔧 설치 문제 해결
+
+### ✅ 성공적인 설치 확인
+설치가 완료되면 다음 명령어로 확인할 수 있습니다:
+```bash
+python -c "
+import pandas; import numpy; import sklearn; import xgboost; import pyarrow
+print('✅ 모든 패키지가 성공적으로 설치되었습니다!')
+print(f'Pandas: {pandas.__version__}')
+print(f'NumPy: {numpy.__version__}')
+print(f'Scikit-learn: {sklearn.__version__}')
+print(f'XGBoost: {xgboost.__version__}')
+print(f'PyArrow: {pyarrow.__version__}')
+"
+```
+
+### 🚨 일반적인 문제와 해결책
+
+#### 1. PyTorch 설치 오류
+```bash
+# CUDA 버전 확인 후 적절한 PyTorch 설치
+nvidia-smi  # CUDA 버전 확인
+
+# CUDA 12.4용 PyTorch 설치
+conda install pytorch=2.4.1 torchvision=0.19.1 torchaudio -c pytorch -c nvidia -y
+```
+
+#### 2. NVIDIA 패키지 의존성 충돌
+```bash
+# pandas 버전 충돌 시 해결
+conda install pandas=1.5.3 -c conda-forge -y  # nvtabular 호환 버전
+
+# 또는 NVIDIA 패키지 없이 기본 설치
+pip install -r requirements.txt  # NVIDIA 패키지 주석 처리된 버전
+```
+
+#### 3. 메모리 부족 오류
+```bash
+# 대용량 데이터 처리 시 메모리 모니터링
+python -c "import psutil; print(f'Available RAM: {psutil.virtual_memory().available / 1024**3:.1f} GB')"
+```
+
+#### 4. Python 버전 호환성
+```bash
+# Python 3.12 호환 패키지 설치
+conda install python=3.12 -c conda-forge -y
+```
+
+### 📋 설치 방법별 권장사항
+
+| 상황 | 권장 설치 방법 | 이유 |
+|------|----------------|------|
+| **처음 설치** | Conda 수동 설정 | 의존성 충돌 최소화 |
+| **빠른 테스트** | Pip 기본 설치 | 간단하고 빠름 |
+| **GPU 가속 필요** | Conda + NVIDIA 채널 | CUDA 최적화 |
+| **메모리 제한** | Pip 기본 설치 | 경량 설치 |
+
+### 🔄 환경 재설정
+문제가 지속되면 환경을 완전히 재설정하세요:
+```bash
+# Conda 환경 제거 후 재생성
+conda env remove -n toss-env
+conda env create -f environment.yml
+conda activate toss-env
+```
 
 ## 📚 참고 논문
 
