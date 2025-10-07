@@ -3,8 +3,7 @@
 
 # Data paths
 data:
-  train_path: "data/train.parquet"
-  output_dir: null  # Will be auto-generated with timestamp
+  train_path: "/data1/seunghoon/train.parquet"
   temp_dir: "tmp"
 
 # Cross-validation settings

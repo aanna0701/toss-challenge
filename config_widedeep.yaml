@@ -1,0 +1,72 @@
+# WideDeepCTR 모델 설정
+MODEL_TYPE: widedeep
+
+# 기본 훈련 설정
+BATCH_SIZE: 1024
+EPOCHS: 20
+LEARNING_RATE: 0.001
+WEIGHT_DECAY: 0.00001
+SEED: 42
+
+# Warmup 설정
+WARMUP:
+  ENABLED: true
+  WARMUP_EPOCHS: 3  # warmup할 에포크 수
+
+# 검증 데이터 분할 비율
+VAL_SPLIT: 0.1
+
+# Early Stopping 설정
+EARLY_STOPPING:
+  ENABLED: true          # Early stopping 사용 여부
+  PATIENCE: 5            # 개선이 없는 에포크 수 (patience) - 테스트용
+  MIN_DELTA: 0.00001       # 개선으로 인정할 최소 변화량
+  MONITOR: "val_score"   # 모니터링할 메트릭 (val_loss, val_score 등)
+  MODE: "max"           # 모니터링 모드 (min: 감소, max: 증가)
+  RESTORE_BEST_WEIGHTS: true  # 최고 성능 가중치 복원 여부
+
+# 메트릭 설정
+METRICS:
+  SAVE_LOGS: true        # 훈련 로그 저장 여부
+  LOG_FILE: "train_logs.csv"  # 로그 파일명
+
+# Gradient Norm 설정
+GRADIENT_NORM:
+  ENABLED: true          # Gradient norm 측정 활성화
+  SAVE_LOGS: true        # Gradient norm 로그 저장
+  LOG_FILE: "gradient_norms.csv"  # Gradient norm 로그 파일명
+  COMPONENTS:            # 측정할 모델 구성 요소들
+    - "lstm"            # LSTM 부분
+    - "model"           # 모델 부분 (MLP/Transformer 등)
+    - "total"           # 전체 모델
+
+# 모델 설정 - WideDeepCTR 모델
+MODEL:
+  # WideDeepCTR 모델 설정
+  WIDEDEEP:
+    EMB_DIM: 16              # Embedding dimension for categorical features
+    LSTM_HIDDEN: 64          # LSTM hidden size
+    HIDDEN_UNITS: [512, 256, 128]  # MLP hidden units
+    DROPOUT: [0.1, 0.2, 0.3]       # Dropout rates for each layer
+    
+  # 피처 분류 설정 (chunk_eda_results.json 기반)
+  FEATURES:
+    CATEGORICAL:              # 실제 범주형 피처들 (categorical_stats)
+      - "gender"
+      - "age_group" 
+      - "inventory_id"
+      - "day_of_week"
+      - "hour"
+    NUMERICAL:                # 수치형 피처들 (numerical_stats에서 l_feat_20, l_feat_23 제외)
+      # l_feat_*, feat_*, history_* 등 (l_feat_20, l_feat_23 제외)
+    EXCLUDED:                 # 사용하지 않을 피처들
+      - "l_feat_20"           # 상수값 (std=0.0)
+      - "l_feat_23"           # 상수값 (std=0.0)
+    SEQUENTIAL: "seq"         # 시퀀스 피처
+
+# 파일 경로 설정
+PATHS:
+  MODEL_SAVE: "trained_model_{datetime}.pth"
+  TEMP_MODEL: "temp_model_{datetime}.pth"  # 임시 웨이트 파일
+  TRAIN_DATA: "data/train.parquet"  # 원하는 데이터 파일 경로로 변경
+  TEST_DATA: "data/test.parquet"

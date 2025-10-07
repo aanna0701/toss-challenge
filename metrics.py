@@ -95,7 +95,7 @@ def calculate_score(y_true, y_pred):
     }
 
 
-def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transformer"):
+def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transformer", fabric=None):
     """
     모델 평가 함수
     
@@ -103,7 +103,7 @@ def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transf
         model: 평가할 모델
         data_loader: 평가 데이터 로더
         device: 사용할 디바이스
-        model_type: 모델 타입 ("tabular_transformer")
+        model_type: 모델 타입 ("tabular_transformer", "widedeep_ctr")
     
     Returns:
         dict: 평가 결과 (loss, ap, wll, score)
@@ -117,19 +117,39 @@ def evaluate_model(model, data_loader, device="cuda", model_type="tabular_transf
     
     with torch.no_grad():
         for batch in data_loader:
-            ys = batch.get('ys').to(device)
+            # 배치 데이터 처리 (Fabric 지원)
+            # Fabric을 사용하는 경우 배치가 자동으로 올바른 디바이스로 이동됨
+            ys = batch.get('ys')
+            x_categorical = batch.get('x_categorical')
+            x_numerical = batch.get('x_numerical')
+            seqs = batch.get('seqs')
+            seq_lens = batch.get('seq_lengths')
             
-            # TabularTransformer 모델용 배치 처리
-            x_categorical = batch.get('x_categorical').to(device)
-            x_numerical = batch.get('x_numerical').to(device)
-            seqs = batch.get('seqs').to(device)
-            seq_lens = batch.get('seq_lengths').to(device)
-            logits = model(
-                x_categorical=x_categorical,
-                x_numerical=x_numerical,
-                x_seq=seqs,
-                seq_lengths=seq_lens
-            )
+            # Fabric을 사용하지 않는 경우에만 수동으로 디바이스 이동
+            if not fabric:
+                ys = ys.to(device)
+                x_categorical = x_categorical.to(device)
+                x_numerical = x_numerical.to(device)
+                seqs = seqs.to(device)
+                seq_lens = seq_lens.to(device)
+            
+            # 모델 타입에 따라 forward 호출 방식 결정
+            if model_type == "widedeep_ctr":
+                # WideDeepCTR 모델
+                logits = model(
+                    num_x=x_numerical,
+                    cat_x=x_categorical,
+                    seqs=seqs,
+                    seq_lengths=seq_lens
+                )
+            else:
+                # TabularTransformer 모델
+                logits = model(
+                    x_categorical=x_categorical,
+                    x_numerical=x_numerical,
+                    x_seq=seqs,
+                    seq_lengths=seq_lens
+                )
             probs = torch.sigmoid(logits)
             
             # Loss 계산

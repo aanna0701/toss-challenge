@@ -1,0 +1,24 @@
+name: toss-env-gbdt
+channels:
+  - nvidia
+  - rapidsai
+  - numba
+  - conda-forge
+  - defaults
+dependencies:
+  # Python & RAPIDS stack
+  - python=3.10
+  - rapids         # cudf/dask-cudf/cuml/rmm/ucx 등 호환 세트
+  - nvtabular
+  - cupy
+  # Specific versions from train_and_predict_GBDT.py
+  - numpy>=1.26.4
+  - pandas
+  - scikit-learn
+  - pyarrow
+  - xgboost
+  - catboost
+  - psutil
+  - dask
+  - pyyaml
+  - tqdm

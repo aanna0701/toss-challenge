@@ -11,6 +11,8 @@ from data_loader import (
     FeatureProcessor,
     ClickDataset,
     collate_fn_transformer_train,
+    save_feature_processor,
+    load_test_data,
 )
 from torch.utils.data import DataLoader
 from early_stopping import create_early_stopping_from_config
@@ -24,7 +26,7 @@ from metrics import (
     evaluate_model,
     print_metrics,
 )
-from model import create_tabular_transformer_model
+from model import create_tabular_transformer_model, create_widedeep_ctr_model
 
 def print_model_summary(model, log_file_path=None):
     """모델의 상세 구조를 출력하고 로그 파일에 저장"""
@@ -92,8 +94,8 @@ def print_model_summary(model, log_file_path=None):
         print(f"📋 모델 구조가 로그 파일에 저장되었습니다: {log_file_path}")
 
 
-def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, results_dir):
-    """모델 훈련 함수"""
+def train_model(train_df, target_col, CFG, device, results_dir, fabric=None):
+    """모델 훈련 함수 (Lightning Fabric 지원)"""
     
     # 1) split
     tr_df, va_df = train_test_split(train_df, test_size=CFG['VAL_SPLIT'], random_state=42, shuffle=True, stratify=train_df['clicked'])
@@ -114,8 +116,24 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
 
     # 2) Dataset / Loader
     # FeatureProcessor 생성 및 학습
+    # test 데이터도 로드하여 범주형 피처의 모든 값을 파악
+    print("📊 테스트 데이터 로드 중 (범주형 피처 인코딩용)...")
+    test_df = load_test_data(CFG)
+    print(f"✅ 테스트 데이터 로드 완료: {test_df.shape}")
+    
     feature_processor = FeatureProcessor(config=CFG, normalization_stats_path="analysis/results/normalization_stats.json")
-    feature_processor.fit(tr_df)
+    feature_processor.fit(tr_df, test_df)  # train과 test를 모두 사용하여 fit
+    
+    # 테스트 데이터 메모리 해제 (더 이상 필요 없음)
+    del test_df
+    import gc
+    gc.collect()
+    print("🗑️  테스트 데이터 메모리 해제")
+    
+    # FeatureProcessor 저장 (예측 시 사용) - rank 0에서만 저장
+    if fabric is None or fabric.is_global_zero:
+        feature_processor_path = os.path.join(results_dir, "feature_processor.pkl")
+        save_feature_processor(feature_processor, feature_processor_path)
     
     # 훈련 및 검증 데이터셋 생성
     train_dataset = ClickDataset(tr_df, feature_processor, target_col, has_target=True, has_id=False)
@@ -124,50 +142,97 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     # 데이터로더 생성
     train_loader = DataLoader(train_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=True, collate_fn=collate_fn_transformer_train)
     val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, collate_fn=collate_fn_transformer_train)
+    
+    # Fabric을 사용하는 경우 DataLoader를 래핑
+    if fabric:
+        print(f"🔧 DataLoader를 Fabric으로 래핑 중...")
+        train_loader = fabric.setup_dataloaders(train_loader)
+        val_loader = fabric.setup_dataloaders(val_loader)
+        print(f"✅ DataLoader Fabric 래핑 완료")
 
-    # 3) TabularTransformer 모델 생성
+    # 3) 모델 생성
     categorical_cardinalities = list(feature_processor.categorical_cardinalities.values())
     num_categorical_features = len(feature_processor.categorical_features)
     num_numerical_features = len(feature_processor.numerical_features)
     
-    model = create_tabular_transformer_model(
-        num_categorical_features=num_categorical_features,
-        categorical_cardinalities=categorical_cardinalities,
-        num_numerical_features=num_numerical_features,
-        lstm_hidden=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
-        hidden_dim=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
-        n_heads=CFG['MODEL']['TRANSFORMER']['N_HEADS'],
-        n_layers=CFG['MODEL']['TRANSFORMER']['N_LAYERS'],
-        ffn_size_factor=CFG['MODEL']['TRANSFORMER']['FFN_SIZE_FACTOR'],
-        attention_dropout=CFG['MODEL']['TRANSFORMER']['ATTENTION_DROPOUT'],
-        ffn_dropout=CFG['MODEL']['TRANSFORMER']['FFN_DROPOUT'],
-        residual_dropout=CFG['MODEL']['TRANSFORMER']['RESIDUAL_DROPOUT'],
-        device=device
-    )
+    # 모델 타입 결정
+    model_type = CFG.get('MODEL_TYPE', 'transformer')  # 기본값: transformer
+    
+    if model_type == 'widedeep':
+        # WideDeepCTR 모델 생성
+        model = create_widedeep_ctr_model(
+            num_features=num_numerical_features,
+            cat_cardinalities=categorical_cardinalities,
+            emb_dim=CFG['MODEL']['WIDEDEEP']['EMB_DIM'],
+            lstm_hidden=CFG['MODEL']['WIDEDEEP']['LSTM_HIDDEN'],
+            hidden_units=CFG['MODEL']['WIDEDEEP']['HIDDEN_UNITS'],
+            dropout=CFG['MODEL']['WIDEDEEP']['DROPOUT'],
+            device=device
+        )
+        model_type_name = "WideDeepCTR"
+    else:
+        # TabularTransformer 모델 생성 (기본값)
+        model = create_tabular_transformer_model(
+            num_categorical_features=num_categorical_features,
+            categorical_cardinalities=categorical_cardinalities,
+            num_numerical_features=num_numerical_features,
+            lstm_hidden=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
+            hidden_dim=CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM'],
+            n_heads=CFG['MODEL']['TRANSFORMER']['N_HEADS'],
+            n_layers=CFG['MODEL']['TRANSFORMER']['N_LAYERS'],
+            ffn_size_factor=CFG['MODEL']['TRANSFORMER']['FFN_SIZE_FACTOR'],
+            attention_dropout=CFG['MODEL']['TRANSFORMER']['ATTENTION_DROPOUT'],
+            ffn_dropout=CFG['MODEL']['TRANSFORMER']['FFN_DROPOUT'],
+            residual_dropout=CFG['MODEL']['TRANSFORMER']['RESIDUAL_DROPOUT'],
+            device=device
+        )
+        model_type_name = "TabularTransformer"
     
     # 모델 생성 직후 summary 출력
-    print(f"\n📊 모델 Summary:")
-    print(f"   • 모델 타입: TabularTransformer")
+    print("\n📊 모델 Summary:")
+    print(f"   • 모델 타입: {model_type_name}")
     print(f"   • 총 파라미터 수: {sum(p.numel() for p in model.parameters()):,}")
     print(f"   • 학습 가능한 파라미터: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"   • Hidden Dimension: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
-    print(f"   • Attention Heads: {CFG['MODEL']['TRANSFORMER']['N_HEADS']}")
-    print(f"   • Transformer Layers: {CFG['MODEL']['TRANSFORMER']['N_LAYERS']}")
-    print(f"   • LSTM Hidden Size: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
+    
+    if model_type == 'widedeep':
+        print(f"   • Embedding Dimension: {CFG['MODEL']['WIDEDEEP']['EMB_DIM']}")
+        print(f"   • LSTM Hidden Size: {CFG['MODEL']['WIDEDEEP']['LSTM_HIDDEN']}")
+        print(f"   • Hidden Units: {CFG['MODEL']['WIDEDEEP']['HIDDEN_UNITS']}")
+        print(f"   • Dropout Rates: {CFG['MODEL']['WIDEDEEP']['DROPOUT']}")
+    else:
+        print(f"   • Hidden Dimension: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
+        print(f"   • Attention Heads: {CFG['MODEL']['TRANSFORMER']['N_HEADS']}")
+        print(f"   • Transformer Layers: {CFG['MODEL']['TRANSFORMER']['N_LAYERS']}")
+        print(f"   • LSTM Hidden Size: {CFG['MODEL']['TRANSFORMER']['HIDDEN_DIM']}")
+    
     print(f"   • 범주형 피처 수: {num_categorical_features}")
     print(f"   • 수치형 피처 수: {num_numerical_features}")
     print(f"   • Device: {device}")
     
-    # 상세 모델 구조 출력
-    print(f"\n🔍 상세 모델 구조:")
+        # 상세 모델 구조 출력
+    print("\n🔍 상세 모델 구조:")
     if results_dir:
-        from datetime import datetime
         model_summary_log_path = os.path.join(results_dir, f"model_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         print_model_summary(model, model_summary_log_path)
     else:
         print_model_summary(model)
 
+    # 모델을 Fabric으로 래핑 (멀티 GPU 지원)
+    if fabric:
+        print(f"🔧 모델을 Fabric으로 래핑 중...")
+        print(f"   • World Size: {fabric.world_size}")
+        print(f"   • Local Rank: {fabric.local_rank}")
+        print(f"   • Global Rank: {fabric.global_rank}")
+        model = fabric.setup_module(model)
+        print(f"✅ 모델 Fabric 래핑 완료")
+    else:
+        model = model.to(device)
+        print(f"🔧 모델을 {device}로 이동")
+
     criterion = nn.BCEWithLogitsLoss()
+    
+    # Loss function은 Fabric으로 래핑하지 않음 (파라미터가 없어서 DDP 불가)
+    print(f"✅ Criterion 설정 완료 (Fabric 래핑 불필요)")
 
     # Weight decay 적용 (특정 파라미터 제외)
     weight_decay_params = []
@@ -189,18 +254,23 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         {'params': no_decay_params, 'weight_decay': 0.0}
     ], lr=CFG['LEARNING_RATE'])
     
+    # 옵티마이저를 Fabric으로 래핑 (멀티 GPU 지원)
+    if fabric:
+        optimizer = fabric.setup_optimizers(optimizer)
+        print(f"✅ 옵티마이저 Fabric 래핑 완료")
+    
     # Warmup 스케줄러 설정
     warmup_enabled = CFG.get('WARMUP', {}).get('ENABLED', False)
     warmup_epochs = CFG.get('WARMUP', {}).get('WARMUP_EPOCHS', 2)
     
     if warmup_enabled:
-        print(f"🔥 Warmup 스케줄러 활성화:")
+        print("🔥 Warmup 스케줄러 활성화:")
         print(f"   • Warmup Epochs: {warmup_epochs}")
         print(f"   • Base Learning Rate: {CFG['LEARNING_RATE']}")
     else:
         print("🚀 Warmup 스케줄러 비활성화")
     
-    print(f"🔧 Optimizer 설정:")
+    print("🔧 Optimizer 설정:")
     print(f"   • Learning Rate: {CFG['LEARNING_RATE']}")
     print(f"   • Weight Decay: {CFG['WEIGHT_DECAY']}")
     print(f"   • Weight Decay 적용 파라미터: {len(weight_decay_params)}개")
@@ -209,7 +279,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     # Early Stopping 설정
     early_stopping = create_early_stopping_from_config(CFG)
     if early_stopping:
-        print(f"🛑 Early Stopping 활성화:")
+        print("🛑 Early Stopping 활성화:")
         print(f"   • Monitor: {CFG['EARLY_STOPPING']['MONITOR']}")
         print(f"   • Patience: {CFG['EARLY_STOPPING']['PATIENCE']}")
         print(f"   • Min Delta: {CFG['EARLY_STOPPING']['MIN_DELTA']}")
@@ -234,7 +304,6 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     
     # Checkpoint 저장 디렉토리 생성
     if results_dir is None:
-        from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -247,7 +316,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     gradient_components = CFG['GRADIENT_NORM']['COMPONENTS']
     
     if gradient_norm_enabled:
-        print(f"📊 Gradient Norm 측정 활성화:")
+        print("📊 Gradient Norm 측정 활성화:")
         print(f"   • 측정 구성 요소: {gradient_components}")
         print(f"   • 로그 저장: {CFG['GRADIENT_NORM']['SAVE_LOGS']}")
 
@@ -263,7 +332,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
     total_steps = CFG['EPOCHS'] * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch if warmup_enabled else 0
     
-    print(f"📊 훈련 설정:")
+    print("📊 훈련 설정:")
     print(f"   • 총 스텝: {total_steps}")
     print(f"   • 에포크당 스텝: {steps_per_epoch}")
     print(f"   • Warmup 스텝: {warmup_steps}")
@@ -291,40 +360,71 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
             optimizer.zero_grad()
             
             # TabularTransformer 모델용 배치 처리
-            x_categorical = batch.get('x_categorical').to(device)
-            x_numerical = batch.get('x_numerical').to(device)
-            seqs = batch.get('seqs').to(device)
-            seq_lens = batch.get('seq_lengths').to(device)
-            ys = batch.get('ys').to(device)
-            logits = model(
-                x_categorical=x_categorical,
-                x_numerical=x_numerical,
-                x_seq=seqs,
-                seq_lengths=seq_lens
-            )
+            # Fabric을 사용하는 경우 배치가 자동으로 올바른 디바이스로 이동됨
+            x_categorical = batch.get('x_categorical')
+            x_numerical = batch.get('x_numerical')
+            seqs = batch.get('seqs')
+            seq_lens = batch.get('seq_lengths')
+            ys = batch.get('ys')
+            
+            # Fabric을 사용하지 않는 경우에만 수동으로 디바이스 이동
+            if not fabric:
+                x_categorical = x_categorical.to(device)
+                x_numerical = x_numerical.to(device)
+                seqs = seqs.to(device)
+                seq_lens = seq_lens.to(device)
+                ys = ys.to(device)
+            
+            # 모델 타입에 따라 forward 호출 방식 결정
+            if model_type == 'widedeep':
+                # WideDeepCTR 모델
+                logits = model(
+                    num_x=x_numerical,
+                    cat_x=x_categorical,
+                    seqs=seqs,
+                    seq_lengths=seq_lens
+                )
+            else:
+                # TabularTransformer 모델
+                logits = model(
+                    x_categorical=x_categorical,
+                    x_numerical=x_numerical,
+                    x_seq=seqs,
+                    seq_lengths=seq_lens
+                )
             
             loss = criterion(logits, ys)
-            loss.backward()
+            
+            # Fabric을 사용하는 경우 backward와 step을 자동으로 처리
+            if fabric:
+                fabric.backward(loss)
+                optimizer.step()
+            else:
+                loss.backward()
             
             # Gradient norm 측정 (backward 후, step 전)
-            if gradient_norm_enabled and global_step % 50 == 0:
+            gradient_norms = None
+            if gradient_norm_enabled and global_step % 100 == 0:
                 gradient_norms = calculate_gradient_norms(model, gradient_components)
             
-            optimizer.step()
+            # Fabric을 사용하지 않는 경우에만 수동으로 step 호출
+            if not fabric:
+                optimizer.step()
+            
             epoch_train_loss += loss.item() * ys.size(0)
             
             # 스텝별 로깅 (10 스텝마다 저장)
             current_lr = optimizer.param_groups[0]['lr']
             
             # 10 스텝마다 로그 저장
-            if global_step % 50 == 0:
+            if global_step % 100 == 0:
                 log_entry = {
                     'step': global_step,
                     'epoch': epoch,
                     'batch_idx': batch_idx,
                     'train_loss': loss.item(),
                     'learning_rate': current_lr,
-                    'gradient_norms': gradient_norms
+                    'gradient_norms': gradient_norms if gradient_norms is not None else {'lstm': 0.0, 'model': 0.0, 'total': 0.0}
                 }                
                 # 실시간으로 CSV 파일에 기록
                 if train_log_path:
@@ -340,7 +440,9 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         epoch_train_loss /= len(train_dataset)
 
         # 검증 단계 및 메트릭 계산
-        val_metrics = evaluate_model(model, val_loader, device, "tabular_transformer")
+        # 모델 타입에 따른 평가
+        eval_model_type = "widedeep_ctr" if model_type == 'widedeep' else "tabular_transformer"
+        val_metrics = evaluate_model(model, val_loader, device, eval_model_type, fabric)
         
         # 에포크별 로그 출력
         print(f"\n[Epoch {epoch}/{CFG['EPOCHS']}] Summary:")
@@ -381,24 +483,23 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         print(f"🏆 최고 성능: {CFG['EARLY_STOPPING']['MONITOR']} = {best_score:.6f}")
     
     # 최종 checkpoint 저장 (훈련 완료 시)
-    print(f"💾 최종 checkpoint 저장 중...")
+    print("💾 최종 checkpoint 저장 중...")
     save_checkpoint(model, epoch, optimizer, epoch_train_loss, val_metrics, checkpoint_dir, CFG=CFG)
     
     # Best checkpoint 저장 (최고 성능 가중치)
     if early_stopping and early_stopping.get_best_weights() is not None:
-        print(f"🏆 Best checkpoint 저장 중...")
+        print("🏆 Best checkpoint 저장 중...")
         best_checkpoint_path = os.path.join(checkpoint_dir, "best.pth")
         torch.save(early_stopping.get_best_weights(), best_checkpoint_path)
         print(f"✅ Best checkpoint 저장 완료: {best_checkpoint_path}")
         print(f"   • Best {CFG['EARLY_STOPPING']['MONITOR']}: {early_stopping.get_best_score():.6f}")
     else:
-        print(f"⚠️  Best checkpoint 저장 건너뜀 (Early Stopping 비활성화 또는 가중치 없음)")
+        print("⚠️  Best checkpoint 저장 건너뜀 (Early Stopping 비활성화 또는 가중치 없음)")
 
     # 훈련 로그 저장 (스텝 기반) - CSV는 이미 실시간으로 저장됨
     if CFG['METRICS']['SAVE_LOGS']:
         # results_dir가 제공되지 않으면 기본 경로 사용
         if results_dir is None:
-            from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             results_dir = CFG['PATHS']['RESULTS_DIR'].replace('{datetime}', timestamp)
             os.makedirs(results_dir, exist_ok=True)
@@ -408,7 +509,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         
         # Warmup 정보 출력
         if warmup_enabled:
-            print(f"🔥 Warmup 완료:")
+            print("🔥 Warmup 완료:")
             print(f"   • Warmup Steps: {warmup_steps}")
             print(f"   • Total Steps: {global_step}")
             print(f"   • Final LR: {CFG['LEARNING_RATE']:.6f}")
@@ -417,7 +518,7 @@ def train_model(train_df, feature_cols, seq_col, target_col, CFG, device, result
         epoch_logs = [log for log in training_logs if 'val_score' in log]
         if epoch_logs:
             best_epoch_log = max(epoch_logs, key=lambda x: x['val_score'])
-            print(f"🏆 최고 성능 체크포인트:")
+            print("🏆 최고 성능 체크포인트:")
             print(f"   • Step: {best_epoch_log['step']}")
             print(f"   • Epoch: {best_epoch_log['epoch']}")
             print(f"   • Val Score: {best_epoch_log['val_score']:.6f}")

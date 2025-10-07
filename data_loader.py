@@ -1,15 +1,17 @@
 import json
 import os
+import pickle
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import Dataset
 
 class FeatureProcessor:
-    """피처 전처리 클래스"""
+    """피처 전처리 클래스 (LabelEncoder 사용)"""
     
     def __init__(self, config, normalization_stats_path):
         self.config = config
@@ -25,38 +27,61 @@ class FeatureProcessor:
         self.sequential_feature = self.config['MODEL']['FEATURES']['SEQUENTIAL']
         self.excluded_features = self.config['MODEL']['FEATURES']['EXCLUDED']
         
-        # 범주형 피처의 카디널리티 계산
+        # numerical_features는 fit 시점에 데이터를 보고 결정
+        self.numerical_features = []
+        
+        # LabelEncoder 사용
+        self.label_encoders = {}  # {feat: LabelEncoder()}
         self.categorical_cardinalities = {}
-        self.categorical_encoders = {}
         
-    def fit(self, df: pd.DataFrame):
-        """데이터에 맞춰 인코더 학습"""
-        # 범주형 피처 인코딩 설정
-        for feat in self.categorical_features:
-            if feat in df.columns:
-                unique_vals = df[feat].dropna().unique()
-                # NaN은 0, 나머지는 1부터 시작하는 연속된 정수로 매핑
-                unique_vals_sorted = sorted(unique_vals)
-                self.categorical_encoders[feat] = {val: idx + 1 for idx, val in enumerate(unique_vals_sorted)}
-                self.categorical_cardinalities[feat] = len(unique_vals_sorted) + 1  # NaN을 위한 0 포함
-        
+    def fit(self, train_df: pd.DataFrame, test_df: pd.DataFrame = None):
+        """
+        LabelEncoder를 사용하여 범주형 피처 인코딩 학습
+        train_df와 test_df를 모두 받아서 전체 범주 파악
+        """
         # 수치형 피처 목록 생성 (범주형, 시퀀스, ID, target, 제외 피처 제외)
         exclude_cols = set(self.categorical_features + [self.sequential_feature, 'ID', 'clicked'] + self.excluded_features)
-        self.numerical_features = [col for col in df.columns if col not in exclude_cols]
+        self.numerical_features = [col for col in train_df.columns if col not in exclude_cols]
         
+        print("🔧 범주형 피처 인코딩 학습 중...")
+        # 범주형 피처 인코딩 설정 (LabelEncoder 사용)
+        for feat in self.categorical_features:
+            if feat not in train_df.columns:
+                continue
+            
+            # train과 test의 모든 값을 합쳐서 fit
+            if test_df is not None and feat in test_df.columns:
+                all_values = pd.concat([
+                    train_df[feat].astype(str).fillna("UNK"),
+                    test_df[feat].astype(str).fillna("UNK")
+                ], axis=0)
+            else:
+                all_values = train_df[feat].astype(str).fillna("UNK")
+            
+            le = LabelEncoder()
+            le.fit(all_values)
+            
+            self.label_encoders[feat] = le
+            self.categorical_cardinalities[feat] = len(le.classes_)
+            
+            print(f"   • {feat}: {len(le.classes_)} unique categories")
+        
+        print("✅ 범주형 피처 인코딩 학습 완료")
         return self
     
-    def transform(self, df: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """데이터 변환"""
+    def transform(self, df: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """데이터 변환 (LabelEncoder 사용)"""
         batch_size = len(df)
         
-        # 범주형 피처 처리
+        # 범주형 피처 처리 (LabelEncoder 사용)
         categorical_data = []
         for feat in self.categorical_features:
             if feat in df.columns:
-                # 범주형 값을 변환: NaN은 0, 나머지는 1부터 categorical_cardinalities까지
-                encoded = df[feat].map(self.categorical_encoders[feat]).fillna(0).astype(int)
-                categorical_data.append(encoded.values)
+                # LabelEncoder로 변환
+                encoded = self.label_encoders[feat].transform(
+                    df[feat].astype(str).fillna("UNK")
+                )
+                categorical_data.append(encoded)
             else:
                 raise ValueError(f"❌ 범주형 피처 '{feat}'가 데이터에 없습니다!")
         
@@ -236,8 +261,9 @@ def load_train_data(config):
     target_col = "clicked"
     seq_col = "seq"
 
-    # 학습에 사용할 피처: ID/seq/target 제외, 나머지 전부
-    FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
+    # 학습에 사용할 피처: ID/seq/target/제외 피처 제외, 나머지 전부
+    excluded_features = config['MODEL']['FEATURES']['EXCLUDED']
+    FEATURE_EXCLUDE = {target_col, seq_col, "ID"} | set(excluded_features)
     feature_cols = [c for c in train.columns if c not in FEATURE_EXCLUDE]
 
     # 훈련 데이터에서 ID 컬럼 제거 (훈련 시에는 ID가 필요하지 않음)
@@ -248,6 +274,7 @@ def load_train_data(config):
     print("Num features:", len(feature_cols))
     print("Sequence:", seq_col)
     print("Target:", target_col)
+    print("Excluded features:", excluded_features)
 
     return train, feature_cols, seq_col, target_col
 
@@ -265,3 +292,44 @@ def load_test_data(config):
     print("Test shape:", test.shape)
     
     return test
+
+
+def save_feature_processor(feature_processor: FeatureProcessor, save_path: str):
+    """FeatureProcessor를 파일로 저장"""
+    print(f"💾 FeatureProcessor 저장 중...")
+    print(f"   • 경로: {save_path}")
+    
+    # 디렉토리가 없으면 생성
+    save_dir = os.path.dirname(save_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    
+    # FeatureProcessor 저장
+    with open(save_path, 'wb') as f:
+        pickle.dump(feature_processor, f)
+    
+    print(f"✅ FeatureProcessor 저장 완료: {save_path}")
+    print(f"   • 범주형 피처: {len(feature_processor.categorical_features)}개")
+    print(f"   • 수치형 피처: {len(feature_processor.numerical_features)}개")
+    print(f"   • 시퀀스 컬럼: {feature_processor.sequential_feature}")
+
+
+def load_feature_processor(load_path: str) -> FeatureProcessor:
+    """저장된 FeatureProcessor를 로드"""
+    print(f"📂 FeatureProcessor 로드 중...")
+    print(f"   • 경로: {load_path}")
+    
+    # 파일 존재 확인
+    if not os.path.exists(load_path):
+        raise FileNotFoundError(f"❌ FeatureProcessor 파일을 찾을 수 없습니다: {load_path}")
+    
+    # FeatureProcessor 로드
+    with open(load_path, 'rb') as f:
+        feature_processor = pickle.load(f)
+    
+    print(f"✅ FeatureProcessor 로드 완료")
+    print(f"   • 범주형 피처: {len(feature_processor.categorical_features)}개")
+    print(f"   • 수치형 피처: {len(feature_processor.numerical_features)}개")
+    print(f"   • 시퀀스 컬럼: {feature_processor.sequential_feature}")
+    
+    return feature_processor

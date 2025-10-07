@@ -1,7 +1,24 @@
 import torch
 import torch.nn as nn
 
-__all__ = ["create_tabular_transformer_model"]
+__all__ = ["create_tabular_transformer_model", "create_widedeep_ctr_model"]
+
+
+class CrossNetwork(nn.Module):
+    """Cross Network for WideDeepCTR model"""
+    def __init__(self, input_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        self.cross_layers = nn.ModuleList([
+            nn.Linear(input_dim, input_dim) for _ in range(num_layers)
+        ])
+        
+    def forward(self, x):
+        # x: (batch_size, input_dim)
+        x0 = x  # Save the original input
+        for layer in self.cross_layers:
+            x = x0 * layer(x) + x  # Cross layer formula: x0 * (W * x + b) + x
+        return x
 
 
 
@@ -173,6 +190,113 @@ class TabularTransformerModel(nn.Module):
         return output.squeeze(1)  # (B,)
 
 
+class WideDeepCTR(nn.Module):
+    """WideDeepCTR model for click-through rate prediction"""
+    def __init__(self, num_features, cat_cardinalities, emb_dim=16, lstm_hidden=64,
+                 hidden_units=[512, 256, 128], dropout=[0.1, 0.2, 0.3], device='cpu'):
+        super().__init__()
+        self.device = device
+        
+        # Categorical embeddings
+        if len(cat_cardinalities) > 0:
+            self.emb_layers = nn.ModuleList([
+                nn.Embedding(cardinality, emb_dim) for cardinality in cat_cardinalities
+            ])
+        else:
+            self.emb_layers = None
+            
+        # Calculate dimensions
+        cat_input_dim = emb_dim * len(cat_cardinalities) if cat_cardinalities else 0
+        
+        # Batch normalization for numerical features
+        if num_features > 0:
+            self.bn_num = nn.BatchNorm1d(num_features)
+        else:
+            self.bn_num = None
+            
+        # LSTM for sequential features
+        if lstm_hidden > 0:
+            self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_hidden,
+                                num_layers=2, batch_first=True, bidirectional=True)
+            seq_out_dim = lstm_hidden * 2
+        else:
+            self.lstm = None
+            seq_out_dim = 0
+            
+        # Cross Network
+        cross_input_dim = num_features + cat_input_dim + seq_out_dim
+        if cross_input_dim > 0:
+            self.cross = CrossNetwork(cross_input_dim, num_layers=2)
+        else:
+            self.cross = None
+            
+        # Deep MLP
+        input_dim = cross_input_dim
+        if input_dim > 0 and hidden_units:
+            layers = []
+            for i, h in enumerate(hidden_units):
+                layers += [nn.Linear(input_dim, h), nn.ReLU(), nn.Dropout(dropout[i % len(dropout)])]
+                input_dim = h
+            layers += [nn.Linear(input_dim, 1)]
+            self.mlp = nn.Sequential(*layers)
+        else:
+            self.mlp = None
+            
+    def forward(self, num_x=None, cat_x=None, seqs=None, seq_lengths=None):
+        """
+        Forward pass for WideDeepCTR model
+        Args:
+            num_x: numerical features (B, num_features)
+            cat_x: categorical features (B, num_categorical)
+            seqs: sequential features (B, seq_length)
+            seq_lengths: sequence lengths (B,)
+        Returns:
+            output: (B,)
+        """
+        features = []
+        
+        # Process numerical features
+        if self.bn_num is not None and num_x is not None:
+            num_x = self.bn_num(num_x)
+            features.append(num_x)
+            
+        # Process categorical features
+        if self.emb_layers is not None and cat_x is not None:
+            cat_embs = [emb(cat_x[:, i]) for i, emb in enumerate(self.emb_layers)]
+            cat_feat = torch.cat(cat_embs, dim=1)
+            features.append(cat_feat)
+            
+        # Process sequential features
+        if self.lstm is not None and seqs is not None and seq_lengths is not None:
+            seqs = seqs.unsqueeze(-1)  # (B, seq_length, 1)
+            packed = nn.utils.rnn.pack_padded_sequence(
+                seqs, seq_lengths.cpu(), batch_first=True, enforce_sorted=False
+            )
+            _, (h_n, _) = self.lstm(packed)
+            # Concatenate last hidden states from both directions
+            h = torch.cat([h_n[-2], h_n[-1]], dim=1)
+            features.append(h)
+            
+        if not features:
+            raise ValueError("No features provided to the model")
+            
+        # Concatenate all features
+        z = torch.cat(features, dim=1)
+        
+        # Apply cross network
+        if self.cross is not None:
+            z_cross = self.cross(z)
+        else:
+            z_cross = z
+            
+        # Apply MLP
+        if self.mlp is not None:
+            out = self.mlp(z_cross)
+        else:
+            out = z_cross
+            
+        return out.squeeze(1)  # (B,)
+
 
 def create_tabular_transformer_model(num_categorical_features, 
                                    categorical_cardinalities,
@@ -199,6 +323,26 @@ def create_tabular_transformer_model(num_categorical_features,
         attention_dropout=attention_dropout,
         ffn_dropout=ffn_dropout,
         residual_dropout=residual_dropout,
+        device=device
+    ).to(device)
+    return model
+
+
+def create_widedeep_ctr_model(num_features, 
+                              cat_cardinalities,
+                              emb_dim=16,
+                              lstm_hidden=64,
+                              hidden_units=[512, 256, 128],
+                              dropout=[0.1, 0.2, 0.3],
+                              device='cpu'):
+    """WideDeepCTR 모델 생성 함수"""
+    model = WideDeepCTR(
+        num_features=num_features,
+        cat_cardinalities=cat_cardinalities,
+        emb_dim=emb_dim,
+        lstm_hidden=lstm_hidden,
+        hidden_units=hidden_units,
+        dropout=dropout,
         device=device
     ).to(device)
     return model
