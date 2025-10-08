@@ -1,0 +1,81 @@
+# GBDT Configuration for TOSS Challenge
+# Supports both XGBoost and CatBoost models
+
+# Data paths
+data:
+  train_path: "/data1/seunghoon/train.parquet"
+  temp_dir: "tmp"
+
+# Training settings
+training:
+  val_ratio: 0.1
+  force_reprocess: false
+  use_mixup: false     # Enable MixUp data augmentation
+  mixup_alpha: 0.3     # Beta distribution parameter (0.3 recommended)
+  mixup_ratio: 0.5     # Ratio of MixUp samples to add (0.5 = add 50% more data)
+
+# Model selection (xgboost or catboost)
+model:
+  name: "xgboost"
+
+# XGBoost configuration
+xgboost:
+  n_estimators: 200
+  learning_rate: 0.1
+  max_depth: 8
+  subsample: 0.8
+  colsample_bytree: 0.8
+  tree_method: "gpu_hist"
+  gpu_id: 0
+  verbosity: 0
+  early_stopping_rounds: 20
+  random_state: 42
+
+# CatBoost configuration
+catboost:
+  n_estimators: 200
+  learning_rate: 0.1
+  max_depth: 8
+  subsample: 0.8
+  colsample_bylevel: 0.8
+  task_type: "GPU"
+  devices: "0"
+  verbose: false
+  early_stopping_rounds: 20
+  thread_count: -1
+  random_state: 42
+  bootstrap_type: "Bernoulli"  # Required when using subsample
+
+# Preset configurations
+presets:
+  xgboost_fast:
+    model:
+      name: "xgboost"
+    xgboost:
+      n_estimators: 100
+      learning_rate: 0.15
+      max_depth: 6
+  
+  xgboost_deep:
+    model:
+      name: "xgboost"
+    xgboost:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 10
+  
+  catboost_fast:
+    model:
+      name: "catboost"
+    catboost:
+      n_estimators: 100
+      learning_rate: 0.15
+      max_depth: 6
+  
+  catboost_deep:
+    model:
+      name: "catboost"
+    catboost:
+      n_estimators: 300
+      learning_rate: 0.05
+      max_depth: 10

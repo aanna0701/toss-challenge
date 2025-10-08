@@ -1,10 +1,12 @@
 import os
 import random
+import gc
 from datetime import datetime
 
 import numpy as np
 import torch
 import yaml
+from sklearn.metrics import average_precision_score
 
 def seed_everything(seed):
     """시드 고정 함수"""
@@ -95,3 +97,88 @@ def apply_datetime_to_paths(config):
     
     replace_datetime_in_dict(config)
     return config
+
+
+# ============================================================================
+# GBDT 관련 공통 함수들
+# ============================================================================
+
+def calculate_weighted_logloss(y_true, y_pred, eps=1e-15):
+    """Calculate Weighted LogLoss with 50:50 class weights"""
+    y_pred = np.clip(y_pred, eps, 1 - eps)
+    
+    mask_0 = (y_true == 0)
+    mask_1 = (y_true == 1)
+    
+    # Additional clipping to prevent log(0) or log(negative) issues
+    if mask_0.sum() > 0:
+        pred_0 = np.clip(1 - y_pred[mask_0], eps, 1 - eps)
+        ll_0 = -np.mean(np.log(pred_0))
+    else:
+        ll_0 = 0
+    
+    if mask_1.sum() > 0:
+        pred_1 = np.clip(y_pred[mask_1], eps, 1 - eps)
+        ll_1 = -np.mean(np.log(pred_1))
+    else:
+        ll_1 = 0
+    
+    return 0.5 * ll_0 + 0.5 * ll_1
+
+
+def calculate_competition_score(y_true, y_pred):
+    """Calculate competition score: 0.5*AP + 0.5*(1/(1+WLL))"""
+    ap = average_precision_score(y_true, y_pred)
+    wll = calculate_weighted_logloss(y_true, y_pred)
+    score = 0.5 * ap + 0.5 * (1 / (1 + wll))
+    return score, ap, wll
+
+
+def clear_gpu_memory():
+    """Clear GPU memory with aggressive cleanup"""
+    try:
+        # Clear CuPy memory pools
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Try to clear CUDA cache if available
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
+        
+        print("🧹 GPU memory cleared")
+    except Exception as e:
+        print(f"⚠️ Error clearing GPU memory: {e}")
+        gc.collect()
+
+
+def print_memory():
+    """Print current memory usage"""
+    import psutil
+    
+    mem = psutil.virtual_memory()
+    
+    gpu_used = 0
+    gpu_total = 0
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        # CUDA_VISIBLE_DEVICES가 설정된 경우 가시 목록 내 0번
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        gpu_used = gpu_info.used / 1024**3
+        gpu_total = gpu_info.total / 1024**3
+        gpu_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+        print(f"💾 GPU ({gpu_name}): {gpu_used:.1f}GB/{gpu_total:.1f}GB")
+        pynvml.nvmlShutdown()
+    except Exception as e:
+        print(f"💾 GPU: Error getting GPU info - {e}")
+    
+    print(f"💾 CPU: {mem.used/1024**3:.1f}GB/{mem.total/1024**3:.1f}GB ({mem.percent:.1f}%)")
+    return mem.percent

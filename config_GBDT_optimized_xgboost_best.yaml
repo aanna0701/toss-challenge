@@ -1,0 +1,12 @@
+best_params:
+  colsample_bytree: 0.6061695553391381
+  gamma: 0.18340450985343382
+  learning_rate: 0.2708160864249968
+  max_bin: 147.0
+  max_depth: 4.0
+  min_child_weight: 2.0
+  n_estimators: 216.0
+  reg_alpha: 5.472429642032198e-06
+  reg_lambda: 0.00052821153945323
+  subsample: 0.9162213204002109
+best_score: 0.42009693957188865

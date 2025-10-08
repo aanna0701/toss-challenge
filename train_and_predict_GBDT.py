@@ -26,14 +26,13 @@ required_libs = {
 
 # Check installed versions
 import importlib
-import warnings
 
 # Suppress deprecation warnings
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     try:
         import pkg_resources
-    except:
+    except ImportError:
         pkg_resources = None
 
 missing_libs = []
@@ -57,7 +56,7 @@ for lib, required_version in required_libs.items():
                 installed_version = pkg_resources.get_distribution(lib).version
             else:
                 installed_version = 'unknown'
-        except:
+        except (AttributeError, ImportError):
             installed_version = 'unknown'
 
         # Check version compatibility (lenient)
@@ -90,7 +89,6 @@ import time
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import psutil
 
 # GPU libraries
 import cupy as cp
@@ -99,14 +97,16 @@ import cupy as cp
 try:
     import rmm, cudf
     # RTX 3090 24GB 기준: 10~14GB 선할당 권장 (필요 시 조정)
+    # 10GB를 바이트로 변환: 10 * 1024^3
+    initial_pool_size_bytes = 10 * 1024 * 1024 * 1024
     rmm.reinitialize(
         pool_allocator=True,
-        initial_pool_size="10GB",    # 8~14GB 사이에서 조정 가능
+        initial_pool_size=initial_pool_size_bytes,    # 8~14GB 사이에서 조정 가능
         managed_memory=True,         # 부족분 UVM 사용
     )
-    cudf.set_allocator("managed")
+    # cudf.set_allocator("managed")  # Not available in all cuDF versions
     print("✅ RMM initialized (pool=10GB, managed_memory=True)")
-except Exception as e:
+except (ImportError, RuntimeError) as e:
     print(f"⚠️ RMM init skipped: {e}")
 
 # Set GPU device (CUDA_VISIBLE_DEVICES 고려: 가시 목록 내 0번째)
@@ -120,8 +120,6 @@ from merlin.io import Dataset
 # ML libraries
 import xgboost as xgb
 import catboost as cb
-from sklearn.metrics import average_precision_score
-from sklearn.model_selection import StratifiedKFold
 
 # Configuration
 import yaml
@@ -129,18 +127,30 @@ import argparse
 from dataclasses import dataclass
 from typing import Dict, Any
 
+# Import common functions
+from utils import (
+    calculate_competition_score, 
+    clear_gpu_memory, 
+    print_memory
+)
+from data_loader import create_workflow_gbdt
+from mixup import apply_mixup_to_dataset
+
 @dataclass
 class GBDTConfig:
     """Main GBDT configuration"""
     train_path: str
     output_dir: str
     temp_dir: str
-    n_folds: int
+    val_ratio: float
     force_reprocess: bool
     model_name: str
     model_params: Dict[str, Any]
+    use_mixup: bool = False
+    mixup_alpha: float = 0.3
+    mixup_ratio: float = 0.5
 
-def load_yaml_config(config_path: str = 'GBDT_config.yaml') -> Dict[str, Any]:
+def load_yaml_config(config_path: str = 'config_GBDT.yaml') -> Dict[str, Any]:
     """Load configuration from YAML file"""
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -148,7 +158,7 @@ def load_yaml_config(config_path: str = 'GBDT_config.yaml') -> Dict[str, Any]:
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
-def create_config_from_yaml(config_path: str = 'GBDT_config.yaml', preset: str = None) -> GBDTConfig:
+def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str = None) -> GBDTConfig:
     """Create GBDTConfig from YAML file"""
     yaml_config = load_yaml_config(config_path)
 
@@ -168,10 +178,13 @@ def create_config_from_yaml(config_path: str = 'GBDT_config.yaml', preset: str =
         script_dir = os.path.dirname(os.path.abspath(__file__))
         temp_dir = os.path.join(script_dir, temp_dir)
 
-    # Extract CV config
-    cv_config = yaml_config.get('cv', {})
-    n_folds = cv_config.get('n_folds', 5)
-    force_reprocess = cv_config.get('force_reprocess', False)
+    # Extract training config
+    training_config = yaml_config.get('training', {})
+    val_ratio = training_config.get('val_ratio', 0.1)
+    force_reprocess = training_config.get('force_reprocess', False)
+    use_mixup = training_config.get('use_mixup', False)
+    mixup_alpha = training_config.get('mixup_alpha', 0.3)
+    mixup_ratio = training_config.get('mixup_ratio', 0.5)
 
     # Extract model config
     model_config = yaml_config.get('model', {})
@@ -206,24 +219,27 @@ def create_config_from_yaml(config_path: str = 'GBDT_config.yaml', preset: str =
             'n_estimators': cb_config.get('n_estimators', 200),
             'learning_rate': cb_config.get('learning_rate', 0.1),
             'max_depth': cb_config.get('max_depth', 8),
-            'subsample': cb_config.get('subsample', 0.8),
             'colsample_bylevel': cb_config.get('colsample_bylevel', 0.8),
             'task_type': cb_config.get('task_type', 'GPU'),
             'devices': cb_config.get('devices', '0'),
             'verbose': cb_config.get('verbose', False),
             'early_stopping_rounds': cb_config.get('early_stopping_rounds', 20),
             'thread_count': cb_config.get('thread_count', -1),
-            'random_state': cb_config.get('random_state', 42)
+            'random_state': cb_config.get('random_state', 42),
+            'bootstrap_type': cb_config.get('bootstrap_type', 'Bayesian')
         }
 
     return GBDTConfig(
         train_path=train_path,
         output_dir=output_dir,
         temp_dir=temp_dir,
-        n_folds=n_folds,
+        val_ratio=val_ratio,
         force_reprocess=force_reprocess,
         model_name=final_model_name,
-        model_params=model_params
+        model_params=model_params,
+        use_mixup=use_mixup,
+        mixup_alpha=mixup_alpha,
+        mixup_ratio=mixup_ratio
     )
 
 def _deep_update(base_dict: Dict, update_dict: Dict) -> None:
@@ -234,7 +250,7 @@ def _deep_update(base_dict: Dict, update_dict: Dict) -> None:
         else:
             base_dict[key] = value
 
-def get_model_params_dict(config: GBDTConfig, scale_pos_weight: float = None, memory_efficient: bool = True) -> Dict[str, Any]:
+def get_model_params_dict(config: GBDTConfig, scale_pos_weight: float = None) -> Dict[str, Any]:
     """Get model parameters as dictionary for training"""
     if config.model_name == 'xgboost':
         params = {
@@ -253,9 +269,9 @@ def get_model_params_dict(config: GBDTConfig, scale_pos_weight: float = None, me
             'predictor': 'gpu_predictor',
         }
 
-        if memory_efficient:
-            params['max_depth'] = min(params['max_depth'], 6)   # Depth 제한
-            params['tree_method'] = 'approx'                    # gpu_hist 대비 메모리 적음
+        # if memory_efficient:
+        #     params['max_depth'] = min(params['max_depth'], 6)   # Depth 제한
+        #     params['tree_method'] = 'approx'                    # gpu_hist 대비 메모리 적음
 
         if scale_pos_weight:
             params['scale_pos_weight'] = scale_pos_weight
@@ -268,12 +284,18 @@ def get_model_params_dict(config: GBDTConfig, scale_pos_weight: float = None, me
             'iterations': config.model_params['n_estimators'],
             'learning_rate': config.model_params['learning_rate'],
             'depth': config.model_params['max_depth'],
-            'subsample': config.model_params['subsample'],
-            'colsample_bylevel': config.model_params['colsample_bylevel'],
             'verbose': config.model_params['verbose'],
             'random_seed': config.model_params['random_state'],
-            'thread_count': config.model_params['thread_count']
+            'thread_count': config.model_params['thread_count'],
+            'bootstrap_type': config.model_params['bootstrap_type']  # Use from config
         }
+        
+        # GPU에서는 colsample_bylevel (rsm) 지원하지 않음 - CPU에서만 지원
+        if config.model_params['task_type'] == 'GPU':
+            print("   ⚠️ Skipping colsample_bylevel for GPU training (not supported)")
+        else:
+            params['colsample_bylevel'] = config.model_params['colsample_bylevel']
+            
         if scale_pos_weight:
             params['class_weights'] = [1.0, scale_pos_weight]
         return params
@@ -287,10 +309,14 @@ def print_config(config: GBDTConfig):
     print(f"   Model: {config.model_name}")
     print(f"   Input: {config.train_path}")
     print(f"   Output: {config.output_dir}")
-    print(f"   Folds: {config.n_folds}")
+    print(f"   Validation ratio: {config.val_ratio}")
     print(f"   Force reprocess: {config.force_reprocess}")
+    print(f"   MixUp enabled: {config.use_mixup}")
+    if config.use_mixup:
+        print(f"   MixUp alpha: {config.mixup_alpha}")
+        print(f"   MixUp ratio: {config.mixup_ratio}")
 
-    print(f"\n🔧 Model Parameters:")
+    print("\n🔧 Model Parameters:")
     for key, value in config.model_params.items():
         print(f"   {key}: {value}")
 
@@ -300,17 +326,22 @@ print(f"XGBoost version: {xgb.__version__}")
 print(f"CatBoost version: {cb.__version__}")
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
 
+# Test imported functions
+print("Testing memory functions:")
+print_memory()
+clear_gpu_memory()
+
 # Argument parser
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='GBDT Training and Prediction Script')
 
-    parser.add_argument('--config', type=str, default='GBDT_config.yaml',
+    parser.add_argument('--config', type=str, default='config_GBDT.yaml',
                         help='Path to YAML configuration file')
     parser.add_argument('--preset', type=str, default=None,
                         help='Preset configuration (e.g., xgboost_fast, catboost_deep)')
-    parser.add_argument('--n-folds', type=int, default=None,
-                        help='Number of CV folds (overrides config file)')
+    parser.add_argument('--val-ratio', type=float, default=None,
+                        help='Validation split ratio (overrides config file, default: 0.1)')
     parser.add_argument('--force-reprocess', action='store_true',
                         help='Force reprocessing of data even if processed data exists')
 
@@ -320,133 +351,24 @@ def parse_args():
 args = parse_args()
 
 # Configuration - use command line arguments
-print(f"\n🔧 Command line arguments:")
+print("\n🔧 Command line arguments:")
 print(f"   Config file: {args.config}")
 print(f"   Preset: {args.preset}")
-print(f"   N folds: {args.n_folds}")
+print(f"   Val ratio: {args.val_ratio}")
 print(f"   Force reprocess: {args.force_reprocess}")
 
 CONFIG = create_config_from_yaml(args.config, preset=args.preset)
 
 # Override config with command line arguments if provided
-if args.n_folds is not None:
-    CONFIG.n_folds = args.n_folds
+if args.val_ratio is not None:
+    CONFIG.val_ratio = args.val_ratio
 if args.force_reprocess:
     CONFIG.force_reprocess = True
 
 print_config(CONFIG)
 
-# Memory management functions
-def print_memory():
-    """Print current memory usage"""
-    mem = psutil.virtual_memory()
-
-    gpu_used = 0
-    gpu_total = 0
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        # CUDA_VISIBLE_DEVICES가 설정된 경우 가시 목록 내 0번
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        gpu_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        gpu_used = gpu_info.used / 1024**3
-        gpu_total = gpu_info.total / 1024**3
-        gpu_name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
-        print(f"💾 GPU ({gpu_name}): {gpu_used:.1f}GB/{gpu_total:.1f}GB")
-        pynvml.nvmlShutdown()
-    except Exception as e:
-        print(f"💾 GPU: Error getting GPU info - {e}")
-
-    print(f"💾 CPU: {mem.used/1024**3:.1f}GB/{mem.total/1024**3:.1f}GB ({mem.percent:.1f}%)")
-    return mem.percent
-
-def clear_gpu_memory():
-    """Clear GPU memory with aggressive cleanup"""
-    try:
-        # Clear CuPy memory pools
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-
-        # Force garbage collection
-        gc.collect()
-
-        # Try to clear CUDA cache if available
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except:
-            pass
-
-        print("🧹 GPU memory cleared")
-    except Exception as e:
-        print(f"⚠️ Error clearing GPU memory: {e}")
-        gc.collect()
-
-# Test memory functions
-print("Testing memory functions:")
-print_memory()
-clear_gpu_memory()
-
-# Metric functions
-def calculate_weighted_logloss(y_true, y_pred, eps=1e-15):
-    """Calculate Weighted LogLoss with 50:50 class weights"""
-    y_pred = np.clip(y_pred, eps, 1 - eps)
-
-    mask_0 = (y_true == 0)
-    mask_1 = (y_true == 1)
-
-    ll_0 = -np.mean(np.log(1 - y_pred[mask_0])) if mask_0.sum() > 0 else 0
-    ll_1 = -np.mean(np.log(y_pred[mask_1])) if mask_1.sum() > 0 else 0
-
-    return 0.5 * ll_0 + 0.5 * ll_1
-
-def calculate_competition_score(y_true, y_pred):
-    """Calculate competition score: 0.5*AP + 0.5*(1/(1+WLL))"""
-    ap = average_precision_score(y_true, y_pred)
-    wll = calculate_weighted_logloss(y_true, y_pred)
-    score = 0.5 * ap + 0.5 * (1 / (1 + wll))
-    return score, ap, wll
-
-print("✅ Metric functions defined")
-
-def create_workflow():
-    """Create NVTabular workflow optimized for GBDT models"""
-    print("\n🔧 Creating GBDT-optimized workflow...")
-
-    # TRUE CATEGORICAL COLUMNS (only 5)
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-
-    # CONTINUOUS COLUMNS (110 total, l_feat_20, l_feat_23 제외)
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +   # 18
-        [f'feat_b_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_c_{i}' for i in range(1, 9)] +    # 8
-        [f'feat_d_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_e_{i}' for i in range(1, 11)] +   # 10
-        [f'history_a_{i}' for i in range(1, 8)] +   # 7
-        [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25 (l_feat_20, l_feat_23 제외)
-    )
-
-    print(f"   Categorical: {len(true_categorical)} columns")
-    print(f"   Continuous: {len(all_continuous)} columns")
-    print(f"   Total features: {len(true_categorical) + len(all_continuous)}")
-
-    # Minimal preprocessing for GBDT models
-    cat_features = true_categorical >> ops.Categorify(
-        freq_threshold=0,
-        max_size=50000
-    )
-    cont_features = all_continuous >> ops.FillMissing(fill_val=0)
-
-    workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
-
-    print("   ✅ Workflow created (no normalization for tree models)")
-    return workflow
-
 # Test workflow creation
-test_workflow = create_workflow()
+test_workflow = create_workflow_gbdt()
 print("✅ Workflow creation tested successfully")
 
 def process_data():
@@ -510,7 +432,7 @@ def process_data():
 
     # Create and fit workflow
     print("\n📊 Fitting workflow...")
-    workflow = create_workflow()
+    workflow = create_workflow_gbdt()
     workflow.fit(dataset)
     print("   ✅ Workflow fitted")
 
@@ -532,7 +454,7 @@ def process_data():
         print(f"   ✅ Data processed and saved")
         print(f"   ✅ Workflow saved to {workflow_path}")
 
-    except Exception as e:
+    except (OSError, RuntimeError, MemoryError) as e:
         print(f"❌ Error during processing: {e}")
         if os.path.exists(CONFIG.output_dir):
             # Fix "not empty" error by using ignore_errors=True
@@ -542,7 +464,7 @@ def process_data():
     elapsed = time.time() - start_time
     final_mem = print_memory()
 
-    print(f"\n✅ Processing complete!")
+    print("\n✅ Processing complete!")
     print(f"   Time: {elapsed:.1f}s")
     print(f"   Memory increase: +{final_mem - initial_mem:.1f}%")
 
@@ -552,11 +474,12 @@ def process_data():
 # Process data
 processed_dir = process_data()
 
-def run_cv(processed_dir, n_folds=5):
-    """Run stratified cross-validation and generate test predictions"""
+def run_train_val(processed_dir, val_ratio=0.1):
+    """Run train/validation split and generate test predictions"""
     print("\n" + "="*70)
-    print("🔄 Stratified KFold Cross-Validation with Test Predictions")
+    print("🔄 Train/Validation Split with Test Predictions")
     print("="*70)
+    print(f"   Validation ratio: {val_ratio:.1%}")
     
     # Test data path (must exist)
     test_path = 'data/test.parquet'
@@ -574,14 +497,14 @@ def run_cv(processed_dir, n_folds=5):
         gdf = dataset.to_ddf().compute()
         print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
         print(f"   Time: {time.time() - start_load:.1f}s")
-    except Exception as e:
+    except (OSError, RuntimeError, MemoryError) as e:
         print(f"❌ Error loading data: {e}")
         print("   Trying with even smaller partitions...")
         try:
             dataset = Dataset(processed_dir, engine='parquet', part_size='64MB')
             gdf = dataset.to_ddf().compute()
             print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
-        except Exception as e2:
+        except (OSError, RuntimeError, MemoryError) as e2:
             print(f"❌ Failed even with 64MB partitions: {e2}")
             return None
 
@@ -596,7 +519,7 @@ def run_cv(processed_dir, n_folds=5):
     print("   Converting all features to float32 (single pass)...")
     try:
         X = X.astype('float32', copy=False)
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         print(f"   ⚠️ astype(float32) failed with copy=False: {e}")
         X = X.astype('float32')
 
@@ -610,7 +533,7 @@ def run_cv(processed_dir, n_folds=5):
     # Class distribution
     pos_ratio = y.mean()
     scale_pos_weight = (1 - pos_ratio) / pos_ratio
-    print(f"\n📊 Class distribution:")
+    print("\n📊 Class distribution:")
     print(f"   Positive ratio: {pos_ratio:.4f}")
     print(f"   Scale pos weight: {scale_pos_weight:.2f}")
 
@@ -619,10 +542,10 @@ def run_cv(processed_dir, n_folds=5):
     gc.collect()
     clear_gpu_memory()
 
-    # Get model parameters with memory efficiency
-    params = get_model_params_dict(CONFIG, scale_pos_weight, memory_efficient=True)
+    # Get model parameters
+    params = get_model_params_dict(CONFIG, scale_pos_weight)
 
-    print(f"\n🔧 Using {CONFIG.model_name} with parameters (memory optimized):")
+    print(f"\n🔧 Using {CONFIG.model_name} with parameters:")
     for key, value in params.items():
         print(f"   {key}: {value}")
 
@@ -637,7 +560,6 @@ def run_cv(processed_dir, n_folds=5):
         temp_test_path = f'{CONFIG.temp_dir}/test_no_seq.parquet'
         if not os.path.exists(temp_test_path):
             print("   Creating temp test file without excluded columns...")
-            import pyarrow.parquet as pq
             pf = pq.ParquetFile(test_path)
             cols = [c for c in pf.schema.names if c not in ['seq', 'l_feat_20', 'l_feat_23', '']]
             print(f"   Total columns: {len(pf.schema.names)}, Using: {len(cols)} (excluded 'seq', 'l_feat_20', 'l_feat_23')")
@@ -654,8 +576,9 @@ def run_cv(processed_dir, n_folds=5):
         print("   Applying workflow to test data...")
         test_dataset = Dataset(temp_test_path, engine='parquet', part_size='64MB')
         
-        # Create test workflow without 'clicked' column
-        # Use the same preprocessing steps but without 'clicked'
+        # Create test workflow without 'clicked' column (using same preprocessing as training)
+        
+        # Recreate workflow components without 'clicked'
         true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
         all_continuous = (
             [f'feat_a_{i}' for i in range(1, 19)] +
@@ -691,146 +614,191 @@ def run_cv(processed_dir, n_folds=5):
         gc.collect()
         
         print(f"   ✅ Test data loaded: {X_test_np.shape}")
-    except Exception as e:
+    except (OSError, RuntimeError, MemoryError, FileNotFoundError) as e:
         print(f"   ❌ Failed to load test data: {e}")
         raise RuntimeError(f"Test data loading failed: {e}") from e
 
-    # Cross-validation
-    print("\n🔄 Starting cross-validation...")
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    # Train/Validation split
+    print("\n🔄 Splitting data into train and validation...")
+    from sklearn.model_selection import train_test_split
+    
+    train_idx, val_idx = train_test_split(
+        np.arange(len(y)), 
+        test_size=val_ratio, 
+        random_state=42, 
+        stratify=y
+    )
+    
+    print(f"   Train: {len(train_idx):,} samples")
+    print(f"   Val: {len(val_idx):,} samples")
+    print(f"   Train positive ratio: {y[train_idx].mean():.4f}")
+    print(f"   Val positive ratio: {y[val_idx].mean():.4f}")
+    
+    # Apply MixUp augmentation if enabled
+    X_train = X_np[train_idx]
+    y_train = y[train_idx]
+    sample_weight_train = None
+    
+    if CONFIG.use_mixup:
+        print(f"\n🎨 Applying MixUp augmentation...")
+        print(f"   Alpha: {CONFIG.mixup_alpha}")
+        print(f"   Ratio: {CONFIG.mixup_ratio}")
+        
+        # Calculate class weight for base_weight
+        pos_ratio = y_train.mean()
+        class_weight = (1.0, scale_pos_weight)  # (weight_class_0, weight_class_1)
+        
+        X_train, y_train, sample_weight_train = apply_mixup_to_dataset(
+            X_train, y_train, 
+            class_weight=class_weight,
+            alpha=CONFIG.mixup_alpha,
+            ratio=CONFIG.mixup_ratio,
+            rng=np.random.default_rng(42)
+        )
+        
+        print(f"   Original train samples: {len(train_idx):,}")
+        print(f"   Augmented train samples: {len(X_train):,}")
+        print(f"   Added {len(X_train) - len(train_idx):,} MixUp samples")
+        print(f"   Train positive ratio (soft): {y_train.mean():.4f}")
+    else:
+        print("\n⚠️  MixUp disabled")
 
-    cv_scores = []
-    cv_ap = []
-    cv_wll = []
-    test_predictions = []  # Store predictions from each fold
+    # Training
+    print("\n🔄 Training model...")
+    train_start = time.time()
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X_np, y), 1):
-        print(f"\n📍 Fold {fold}/{n_folds}")
-        fold_start = time.time()
+    # Initialize variables
+    y_pred = None
+    best_iteration = None
+    dtrain = None
+    dval = None
+    
+    if CONFIG.model_name == 'xgboost':
+        # Create DMatrix with sample weights if MixUp is enabled
+        if CONFIG.use_mixup and sample_weight_train is not None:
+            dtrain = xgb.DMatrix(X_train, label=y_train, weight=sample_weight_train)
+        else:
+            dtrain = xgb.DMatrix(X_train, label=y_train)
+        dval = xgb.DMatrix(X_np[val_idx], label=y[val_idx])
 
-        print(f"   Train: {len(train_idx):,} | Val: {len(val_idx):,}")
+        print("   Training XGBoost...")
+        if CONFIG.use_mixup:
+            print(f"   Using sample weights (range: [{sample_weight_train.min():.2f}, {sample_weight_train.max():.2f}])")
+        model = xgb.train(
+            params, dtrain,
+            num_boost_round=CONFIG.model_params['n_estimators'],
+            evals=[(dval, 'val')],
+            early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
+            verbose_eval=False
+        )
+        y_pred = model.predict(dval)
+        best_iteration = model.best_iteration
 
-        if CONFIG.model_name == 'xgboost':
-            dtrain = xgb.DMatrix(X_np[train_idx], label=y[train_idx])
-            dval   = xgb.DMatrix(X_np[val_idx],   label=y[val_idx])
-
-            print("   Training XGBoost...")
-            model = xgb.train(
-                params, dtrain,
-                num_boost_round=CONFIG.model_params['n_estimators'],
-                evals=[(dval, 'val')],
-                early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
-                verbose_eval=False
-            )
-            y_pred = model.predict(dval)
-            best_iteration = model.best_iteration
-
-        elif CONFIG.model_name == 'catboost':
-            print("   Training CatBoost...")
-            model = cb.CatBoostClassifier(**params)
+    elif CONFIG.model_name == 'catboost':
+        print("   Training CatBoost...")
+        model = cb.CatBoostClassifier(**params)
+        
+        # Use sample weights if MixUp is enabled
+        if CONFIG.use_mixup and sample_weight_train is not None:
+            print(f"   Using sample weights (range: [{sample_weight_train.min():.2f}, {sample_weight_train.max():.2f}])")
             model.fit(
-                X_np[train_idx], y[train_idx],
+                X_train, y_train,
+                sample_weight=sample_weight_train,
                 eval_set=(X_np[val_idx], y[val_idx]),
                 early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
                 verbose=False
             )
-            y_pred = model.predict_proba(X_np[val_idx])[:, 1]
-            best_iteration = model.get_best_iteration()
-
-        score, ap, wll = calculate_competition_score(y[val_idx], y_pred)
-
-        cv_scores.append(score)
-        cv_ap.append(ap)
-        cv_wll.append(wll)
-
-        print(f"   📊 Results:")
-        print(f"      Score: {score:.6f}")
-        print(f"      AP: {ap:.6f}")
-        print(f"      WLL: {wll:.6f}")
-        print(f"      Best iteration: {best_iteration}")
-        print(f"   ⏱️ Time: {time.time() - fold_start:.1f}s")
-        
-        # Predict on test data
-        print(f"   🔮 Predicting on test data...")
-        if CONFIG.model_name == 'xgboost':
-            dtest = xgb.DMatrix(X_test_np)
-            fold_test_pred = model.predict(dtest)
-            del dtest
         else:
-            fold_test_pred = model.predict_proba(X_test_np)[:, 1]
-        
-        test_predictions.append(fold_test_pred)
-        print(f"      Test predictions saved for fold {fold}")
-
-        # 메모리 정리: 3 fold마다 큼직하게
-        if CONFIG.model_name == 'xgboost':
-            del dtrain, dval
-        del model, y_pred, score, ap, wll, best_iteration, fold_test_pred
-        gc.collect()
-        if fold % 3 == 0:
-            clear_gpu_memory()
-
-    # Final results
-    print("\n" + "="*70)
-    print("📊 Final Cross-Validation Results")
-    print("="*70)
-
-    print(f"\n🏆 Competition Score: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}")
-    print(f"📈 Average Precision: {np.mean(cv_ap):.6f} ± {np.std(cv_ap):.6f}")
-    print(f"📉 Weighted LogLoss: {np.mean(cv_wll):.6f} ± {np.std(cv_wll):.6f}")
-
-    print(f"\nAll fold scores: {[f'{s:.6f}' for s in cv_scores]}")
-
-    # Generate ensemble predictions
-    print("\n" + "="*70)
-    print("🔮 Generating Ensemble Test Predictions")
-    print("="*70)
+            model.fit(
+                X_train, y_train,
+                eval_set=(X_np[val_idx], y[val_idx]),
+                early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
+                verbose=False
+            )
+        y_pred = model.predict_proba(X_np[val_idx])[:, 1]
+        best_iteration = model.get_best_iteration()
     
-    # Average predictions from all folds
-    avg_predictions = sum(test_predictions) / len(test_predictions)
-    print(f"   Averaged {len(test_predictions)} fold predictions")
-    print(f"   Prediction range: [{avg_predictions.min():.6f}, {avg_predictions.max():.6f}]")
+    else:
+        raise ValueError(f"Unknown model: {CONFIG.model_name}")
+
+    # Validation results
+    score, ap, wll = calculate_competition_score(y[val_idx], y_pred)
+
+    print("\n📊 Validation Results:")
+    print(f"   Score: {score:.6f}")
+    print(f"   AP: {ap:.6f}")
+    print(f"   WLL: {wll:.6f}")
+    print(f"   Best iteration: {best_iteration}")
+    print(f"   Training time: {time.time() - train_start:.1f}s")
+    
+    # Predict on test data
+    print("\n🔮 Predicting on test data...")
+    if CONFIG.model_name == 'xgboost':
+        dtest = xgb.DMatrix(X_test_np)
+        test_predictions = model.predict(dtest)
+        del dtest
+        if dtrain is not None:
+            del dtrain
+        if dval is not None:
+            del dval
+    else:
+        test_predictions = model.predict_proba(X_test_np)[:, 1]
+    
+    print(f"   Prediction range: [{test_predictions.min():.6f}, {test_predictions.max():.6f}]")
     
     # Create submission file
     submission_df = pd.DataFrame({
         'ID': test_ids,
-        'clicked': avg_predictions
+        'clicked': test_predictions
     })
     
     submission_path = f'{CONFIG.output_dir}/submission.csv'
     submission_df.to_csv(submission_path, index=False)
     print(f"   ✅ Submission saved to {submission_path}")
     print(f"   Samples: {len(submission_df):,}")
+    
+    # Save model
+    print("\n💾 Saving trained model...")
+    if CONFIG.model_name == 'xgboost':
+        model_path = f'{CONFIG.output_dir}/model.json'
+        model.save_model(model_path)
+    else:
+        model_path = f'{CONFIG.output_dir}/model.cbm'
+        model.save_model(model_path)
+    print(f"   ✅ Model saved to {model_path}")
 
-    # Enhanced memory cleanup after CV
-    print("\n🧹 Cleaning up CV memory...")
-    del X_np, y, cv_ap, cv_wll, test_predictions, avg_predictions, X_test_np
+    # Cleanup
+    print("\n🧹 Cleaning up memory...")
+    del X_np, y, X_train, y_train, model, y_pred, test_predictions, X_test_np
+    if sample_weight_train is not None:
+        del sample_weight_train
     clear_gpu_memory()
-    print("   ✅ CV memory cleaned")
+    print("   ✅ Memory cleaned")
 
-    return cv_scores
+    return score, ap, wll
 
-# Run cross-validation
-cv_scores = run_cv(processed_dir, CONFIG.n_folds)
+# Run training and validation
+val_score, val_ap, val_wll = run_train_val(processed_dir, CONFIG.val_ratio)
 
 # Final summary
-if cv_scores:
+if val_score:
     print("\n" + "🎉"*35)
-    print("CROSS-VALIDATION & PREDICTION COMPLETE!")
+    print("TRAINING & PREDICTION COMPLETE!")
     print("🎉"*35)
-    print(f"\n✅ Final CV Score: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}")
+    print(f"\n✅ Validation Score: {val_score:.6f}")
+    print(f"✅ Validation AP: {val_ap:.6f}")
+    print(f"✅ Validation WLL: {val_wll:.6f}")
     print(f"✅ Model used: {CONFIG.model_name}")
     print(f"✅ Output directory: {CONFIG.output_dir}")
     print("✅ Full dataset processed (10.7M rows)")
     print("✅ GBDT-optimized preprocessing (no normalization)")
-    print(f"✅ Ensemble predictions from {CONFIG.n_folds} folds")
+    print(f"✅ Validation ratio: {CONFIG.val_ratio:.1%}")
     print(f"✅ Submission saved: {CONFIG.output_dir}/submission.csv")
+    model_ext = 'json' if CONFIG.model_name == 'xgboost' else 'cbm'
+    print(f"✅ Model saved: {CONFIG.output_dir}/model.{model_ext}")
     print("="*70)
 else:
-    print("\n⚠️ Cross-validation did not complete. Please check for errors above.")
-
-# Cleanup - removed train_final_model_and_predict() function
-# Now using ensemble of CV fold predictions instead
+    print("\n⚠️ Training did not complete. Please check for errors above.")
 
 # Final cleanup
 clear_gpu_memory()

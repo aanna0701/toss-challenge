@@ -1,22 +1,40 @@
-name: toss-env-dnn
+name: toss-env
 channels:
+  - nvidia
+  - rapidsai
+  - numba
   - conda-forge
   - defaults
 
 dependencies:
-  - python=3.11
+  # Python & RAPIDS stack (requires Python 3.10 for RAPIDS compatibility)
+  - python=3.10
+  
+  # RAPIDS ecosystem (GPU-accelerated data science)
+  - rapids         # cudf/dask-cudf/cuml/rmm/ucx 등 호환 세트
+  - nvtabular
+  - cupy
+  
+  # Core data science packages
+  - numpy>=1.26.4
+  - pandas
+  - scikit-learn
+  - pyarrow
+  
+  # GBDT models
+  - xgboost
+  - catboost
+  
+  # Utilities
+  - psutil
+  - dask
+  - pyyaml
+  - tqdm
   - pip>=23
-
-  # 일반 패키지
-  - pandas=2.2.*
-  - numpy=1.26.*          # (Py3.12과 호환)
-  - scikit-learn=1.5.*
-  - pyyaml=6.*
-  - tqdm=4.*
-  - psutil=5.*
-  - pyarrow=14.*
-
+  
+  # Install PyTorch and related packages via pip for better GPU compatibility
   - pip:
       - torch
       - torchvision
       - lightning
+

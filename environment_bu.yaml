@@ -1,0 +1,22 @@
+name: toss-env-dnn
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip>=23
+
+  # 일반 패키지
+  - pandas=2.2.*
+  - numpy=1.26.*          # (Py3.12과 호환)
+  - scikit-learn=1.5.*
+  - pyyaml=6.*
+  - tqdm=4.*
+  - psutil=5.*
+  - pyarrow=14.*
+
+  - pip:
+      - torch
+      - torchvision
+      - lightning

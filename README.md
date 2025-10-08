@@ -1,167 +1,126 @@
-# Toss Click Prediction Project
+# Toss Click Prediction Challenge
 
-딥러닝을 이용한 클릭 예측 프로젝트입니다. **TabularSeq 모델**, **TabularTransformer 모델**, **WideDeepCTR 모델**, **XGBoost 모델**을 지원합니다.
+클릭 예측 대회를 위한 머신러닝 프로젝트입니다. GBDT (XGBoost/CatBoost) 및 DNN (Deep Neural Network) 모델을 지원합니다.
 
-> **📅 최근 업데이트 (2025-01-02)**: 콘다 설치 가이드 추가, 의존성 충돌 해결 방법 개선, 설치 확인 스크립트 추가
+## 🚀 빠른 시작
 
-## ⚡ 빠른 시작
-
-### DNN 모델 (TabularTransformer, WideDeepCTR)
+### 1. 환경 설정 (통합 환경)
 ```bash
-# 1) 환경 생성
+# 단일 통합 환경으로 GBDT와 DNN 모두 사용 가능
 conda env create -f environment.yaml
-conda activate toss-env-dnn
-
-# 2) 훈련 실행
-python train_and_predict.py --config config_widedeep.yaml --result_dir results/ --device 8 --strategy ddp
+conda activate toss-env
 ```
 
-### GBDT 모델 (XGBoost, CatBoost)
+### 2. GBDT 모델 실행
 ```bash
-# 1) 환경 생성
-conda env create -f environment_GBDT.yaml
-conda activate toss-env-gbdt
-
-# 2) 훈련 실행
+# XGBoost 기본 실행
 python train_and_predict_GBDT.py
+
+# CatBoost 사용
+python train_and_predict_GBDT.py --config config_GBDT.yaml --preset catboost_deep
+
+# Validation ratio 변경
+python train_and_predict_GBDT.py --val-ratio 0.2
 ```
 
-## 🚀 주요 특징
-
-- ✅ **다섯 가지 모델 지원**: TabularSeq (기존) + TabularTransformer (신규) + **WideDeepCTR (신규)** + XGBoost (신규) + **GBDT (XGBoost/CatBoost)**
-- ✅ **NVIDIA Merlin 통합**: 고성능 테이블 데이터 처리 및 GPU 가속
-- ✅ **고급 피처 처리**: 범주형/수치형/시퀀스 피처 분리 처리
-- ✅ **Transformer 아키텍처**: FT-Transformer 기반 테이블 데이터 모델
-- ✅ **GBDT 모델**: XGBoost/CatBoost 지원, YAML 설정, Command Line 인터페이스
-- ✅ **XGBoost 모델**: 시퀀스 피처를 제외한 범주형/수치형 피처만 사용
-- ✅ **누락값 처리**: NaN 토큰을 통한 학습 가능한 누락값 처리
-- ✅ **메모리 효율적**: 대용량 데이터 샘플링 및 청크 처리
-- ✅ **완전 자동화**: 훈련 → 예측 → 결과 저장 원클릭 실행
+### 3. DNN 모델 실행
+```bash
+# 멀티 GPU 훈련 (DDP)
+python train_and_predict_dnn_ddp.py
+```
 
 ## 📁 프로젝트 구조
 
 ```
-├── main.py                    # 메인 설정 및 초기화
-├── utils.py                   # 유틸리티 함수들
-├── config.yaml               # 설정 파일 (TabularSeq + Transformer)
-├── data_loader.py            # 데이터 로더 (모델별 분기 + 전처리된 데이터)
-├── model.py                  # 모델 정의 (TabularSeq + Transformer)
-├── train.py                  # 모델 훈련 (모델별 분기 + 전처리된 데이터)
-├── predict.py                # 예측 및 제출 (모델별 분기)
-├── train_and_predict.py      # 🆕 원클릭 훈련+예측 워크플로우
-├── train_and_predict_xgboost.py  # 🆕 XGBoost 전용 훈련+예측 워크플로우
-├── train_and_predict_GBDT.py     # 🆕 GBDT (XGBoost/CatBoost) 훈련+예측 워크플로우
-├── GBDT_config.yaml              # 🆕 GBDT 설정 파일 (YAML)
-├── train_and_predict_merlin.py  # 🆕 NVIDIA Merlin 기반 고성능 워크플로우
-├── data_loader_merlin.py     # 🆕 NVIDIA Merlin 기반 고성능 데이터로더
-├── test_merlin_dataloader.py # 🆕 Merlin 데이터로더 테스트 스크립트
-├── dataset_split.py          # 🆕 10-fold 데이터 분할 (feat_e_3 기준)
-├── preprocess_train_data.py  # 🆕 훈련 데이터 전처리 및 텐서 저장
-├── xgboost_model.py          # 🆕 XGBoost 모델 클래스
-├── config_xgboost.yaml       # 🆕 XGBoost 설정 파일
-├── test_xgboost.py           # 🆕 XGBoost 모델 테스트 스크립트
-├── metrics.py                # 평가 메트릭 (AP, WLL, Score)
-├── early_stopping.py         # 조기 종료 기능
-├── gradient_norm.py          # 그래디언트 모니터링
-├── data/                     # 🆕 데이터 파일들
-│   ├── train.parquet         # 훈련 데이터 (필수)
-│   ├── test.parquet          # 테스트 데이터 (필수)
-│   ├── missing_data.parquet  # feat_e_3 누락 데이터 (자동 생성)
-│   ├── clicked_1_data.parquet # feat_e_3 존재 + clicked=1 데이터 (자동 생성)
-│   ├── clicked_0_data.parquet # feat_e_3 존재 + clicked=0 데이터 (자동 생성)
-│   ├── train_fold1.parquet   # 9-fold 분할 데이터 (자동 생성)
-│   ├── ...                   # train_fold2.parquet ~ train_fold9.parquet
-│   ├── x_categorical.pt      # 범주형 피처 텐서 (전처리 후)
-│   ├── x_numerical.pt        # 수치형 피처 텐서 (전처리 후)
-│   ├── sequences.pt          # 시퀀스 피처 텐서 (전처리 후)
-│   ├── nan_mask.pt           # NaN 마스크 텐서 (전처리 후)
-│   ├── targets.pt            # 타겟 텐서 (전처리 후)
-│   ├── ids.pt                # ID 텐서 (전처리 후)
-│   ├── feature_processor.pt  # 전처리 파이프라인 (전처리 후)
-│   └── metadata.json         # 메타데이터 (전처리 후)
-├── analysis/                 # 데이터 분석
-│   ├── chunk_eda.py         # 청크 단위 EDA (전체 데이터)
-│   ├── chunk_utils.py       # 청크 분석 유틸리티
-│   ├── compute_normalization_stats.py  # 정규화 통계 계산
-│   ├── feature_quality_analysis.py     # 피처 품질 분석
-│   ├── eda_utils.py         # EDA 유틸리티 함수
-│   └── results/             # 분석 결과
-│       ├── chunk_eda_results.json      # 청크 EDA 결과
-│       ├── normalization_stats.json    # 정규화 통계
-│       └── feature_quality_analysis.json  # 피처 품질 분석
-├── requirements.txt          # Pip 패키지 목록
-├── environment-cpu.yml       # Conda 환경 (CPU)
-├── environment.yml          # Conda 환경 (GPU 지원)
-├── conda_install_commands.txt # 콘다 설치 명령어 모음
-├── setup_env.sh              # 환경 설정 스크립트 (Linux/macOS)
-├── setup_env.bat             # 환경 설정 스크립트 (Windows)
-└── README.md                 # 사용 가이드
+toss-challenge/
+├── train_and_predict_GBDT.py    # GBDT 모델 훈련 및 예측
+├── train_and_predict_dnn_ddp.py # DNN 멀티 GPU 훈련
+├── hpo_xgboost.py               # XGBoost 하이퍼파라미터 최적화
+├── hpo_catboost.py              # CatBoost 하이퍼파라미터 최적화
+├── hpo_dnn.py                   # DNN 하이퍼파라미터 최적화
+├── dataset_split.py             # 데이터셋 10-fold 분할
+├── utils.py                     # 공통 유틸리티 함수
+├── data_loader.py               # 데이터 로더 (DNN + GBDT)
+├── mixup.py                     # MixUp 데이터 증강 함수
+├── config_GBDT.yaml            # GBDT 설정 파일
+├── environment.yaml            # 통합 conda 환경 설정
+├── analysis/                   # 데이터 분석 스크립트 (별도 README 참조)
+└── data/                       # 데이터 디렉토리
+    ├── train.parquet           # 훈련 데이터 (필수)
+    └── test.parquet            # 테스트 데이터 (필수)
 ```
 
-## 🚀 GBDT 모델 사용법 (XGBoost/CatBoost)
+## 🔧 환경 설정
 
-### 환경 설정
+### 통합 환경 (environment.yaml)
+단일 conda 환경으로 GBDT와 DNN 모델을 모두 실행할 수 있습니다.
+
+**주요 라이브러리:**
+- Python 3.10
+- **RAPIDS 스택**: cudf, nvtabular, cupy (GPU 가속 데이터 처리)
+- **GBDT 모델**: XGBoost, CatBoost
+- **딥러닝**: PyTorch, Lightning (pip 설치로 GPU 호환성 최적화)
+- **데이터 처리**: pandas, numpy, scikit-learn, dask
+
+**설치:**
 ```bash
-# 1) 환경 생성
-conda env create -f environment_GBDT.yaml
-conda activate toss-env-gbdt
+conda env create -f environment.yaml
+conda activate toss-env
 ```
 
-### 데이터 준비
+**기존 환경 업데이트:**
 ```bash
-# data 디렉토리에 다음 파일들이 필요합니다:
-data/
-├── train.parquet    # 훈련 데이터 (필수)
-└── test.parquet     # 테스트 데이터 (필수)
+conda activate toss-env
+conda env update -f environment.yaml --prune
 ```
+
+## 🛠️ GBDT 모델 사용법
 
 ### 기본 실행
 ```bash
-# 기본 실행 (XGBoost)
+# XGBoost (기본, 10% validation)
 python train_and_predict_GBDT.py
 
-# CatBoost 모델 사용
-python train_and_predict_GBDT.py --model catboost
+# CatBoost 사용
+python train_and_predict_GBDT.py --config config_GBDT.yaml
 
-# Preset 사용
-python train_and_predict_GBDT.py --preset xgboost_fast
-python train_and_predict_GBDT.py --preset catboost_deep
+# Validation ratio 변경
+python train_and_predict_GBDT.py --val-ratio 0.2
+
+# 데이터 재처리 강제
+python train_and_predict_GBDT.py --force-reprocess
 ```
 
-### Command Line 옵션
+### MixUp Data Augmentation
+MixUp은 두 샘플을 선형 보간하여 새로운 학습 샘플을 생성하는 데이터 증강 기법입니다. 특히 불균형 데이터셋에서 효과적입니다.
+
 ```bash
-# 도움말 보기
-python train_and_predict_GBDT.py --help
-
-# 주요 옵션들:
---config CONFIG_FILE    # YAML 설정 파일 (기본: GBDT_config.yaml)
---model {xgboost,catboost}  # 모델 타입
---preset PRESET_NAME    # Preset 설정 (xgboost_fast, catboost_deep 등)
---n-folds N             # Cross-validation fold 수
---force-reprocess       # 데이터 재처리 강제
---output-dir DIR        # 출력 디렉토리
+# config_GBDT.yaml에서 설정
+training:
+  use_mixup: true      # MixUp 활성화
+  mixup_alpha: 0.3     # Beta 분포 파라미터 (0.3 권장)
+  mixup_ratio: 0.5     # 추가할 MixUp 샘플 비율 (0.5 = 50% 증가)
 ```
 
-### 사용 예시
-```bash
-# 빠른 실험 (3-fold CV)
-python train_and_predict_GBDT.py --model catboost --n-folds 3
+**MixUp 파라미터:**
+- `alpha`: Beta(α, α) 분포에서 mixing coefficient λ를 샘플링
+  - α=1.0: 균등한 mixing
+  - α<1.0: 원본 샘플 선호 (0.3 권장)
+  - α>1.0: 균형잡힌 mixing 선호
+- `ratio`: 추가할 MixUp 샘플의 비율
+  - 0.5: 원본의 50% 추가 (1.5배 데이터)
+  - 1.0: 원본과 동일 개수 추가 (2배 데이터)
 
-# 깊은 모델로 실험
-python train_and_predict_GBDT.py --preset xgboost_deep --force-reprocess
-
-# 커스텀 출력 디렉토리
-python train_and_predict_GBDT.py --model catboost --output-dir results/my_experiment
-
-# 여러 옵션 조합
-python train_and_predict_GBDT.py --model catboost --n-folds 10 --force-reprocess --output-dir results/catboost_10fold
-```
-
-### 설정 파일 (GBDT_config.yaml)
+### 설정 파일 (config_GBDT.yaml)
 ```yaml
 # 모델 선택
 model:
   name: "xgboost"  # "xgboost" 또는 "catboost"
+
+# Training 설정
+training:
+  val_ratio: 0.1
+  force_reprocess: false
 
 # XGBoost 설정
 xgboost:
@@ -171,6 +130,7 @@ xgboost:
   subsample: 0.8
   colsample_bytree: 0.8
   tree_method: "gpu_hist"
+  gpu_id: 0
   early_stopping_rounds: 20
 
 # CatBoost 설정
@@ -178,450 +138,251 @@ catboost:
   n_estimators: 200
   learning_rate: 0.1
   max_depth: 8
-  subsample: 0.8
   task_type: "GPU"
+  devices: "0"
   early_stopping_rounds: 20
-
-# Preset 설정들
-presets:
-  xgboost_fast:
-    xgboost:
-      n_estimators: 100
-      learning_rate: 0.15
-      max_depth: 6
-  catboost_deep:
-    catboost:
-      n_estimators: 300
-      learning_rate: 0.05
-      max_depth: 10
 ```
 
 ### 출력 파일
 ```
-results/gbdt_{model}_{timestamp}/
-├── workflow/                    # 전처리 파이프라인
-├── *.parquet                   # 전처리된 데이터
-├── final_model.json/.cbm       # 학습된 모델
-└── submission.csv              # 제출 파일
+result_GBDT_{model}/
+├── workflow/             # NVTabular 전처리 파이프라인
+├── *.parquet            # 전처리된 데이터
+└── submission.csv       # 제출 파일
 ```
 
-### 실행 과정
-1. **환경 설정 및 라이브러리 체크**
-2. **데이터 전처리** (NVTabular)
-3. **Cross-validation** (5-fold 기본)
-4. **최종 모델 학습** (전체 데이터)
-5. **Test 데이터 추론**
-6. **결과 저장** (모델 + 제출 파일)
+## 🧠 DNN 모델 사용법
 
-### 메모리 관리
-- 각 CV fold 완료 후 메모리 정리
-- GPU 메모리 효율적 사용
-- 대용량 데이터 처리 최적화
+### 멀티 GPU 훈련
+```bash
+# 4개 GPU 사용 (DDP)
+python train_and_predict_dnn_ddp.py
 
-## 🛠️ 환경 설정
+# 특정 GPU 선택
+CUDA_VISIBLE_DEVICES=0,1 python train_and_predict_dnn_ddp.py
+```
 
-### DNN 모델용 환경 (environment.yaml)
+### 주요 설정 (코드 내부)
+```python
+CFG = {
+    'BATCH_SIZE': 1024,
+    'EPOCHS': 5,
+    'LEARNING_RATE': 1e-3,
+    'NUM_DEVICES': 4,    # GPU 개수
+    'STRATEGY': 'ddp',   # 분산 전략
+    'VAL_RATIO': 0.1,
+    'USE_MIXUP': True,   # MixUp 활성화
+    'MIXUP_ALPHA': 0.3,  # Beta 분포 파라미터
+    'MIXUP_PROB': 0.5    # 배치별 MixUp 적용 확률
+}
+```
 
-TabularTransformer, TabularSeq, WideDeepCTR 모델을 위한 환경입니다.
+### MixUp for DNN
+DNN 모델은 온라인 MixUp을 사용하여 각 배치마다 확률적으로 데이터 증강을 수행합니다.
+
+**DNN MixUp 특징:**
+- **온라인 증강**: 학습 중 각 배치마다 실시간으로 MixUp 적용
+- **확률적 적용**: `MIXUP_PROB`로 배치별 적용 확률 조절
+- **수치형 피처 전용**: 현재 구현은 연속형 피처에만 MixUp 적용 (범주형/시퀀스는 원본 유지)
+- **메모리 효율적**: 원본 데이터 크기 유지하면서 증강 효과
+
+**권장 설정:**
+- `MIXUP_ALPHA`: 0.2~0.4 (0.3 권장)
+- `MIXUP_PROB`: 0.3~0.7 (0.5 권장)
+
+## 🎯 하이퍼파라미터 최적화 (HPO)
+
+Optuna를 사용하여 모델의 하이퍼파라미터를 자동으로 최적화합니다.
+
+### XGBoost HPO
+```bash
+# 기본 실행
+python hpo_xgboost.py --data-path data/train.parquet --n-trials 100 --val-ratio 0.2
+
+# 빠른 테스트 (데이터 서브샘플링)
+python hpo_xgboost.py --data-path data/train.parquet --n-trials 30 --subsample-ratio 0.1
+
+# 시간 제한 설정
+python hpo_xgboost.py --data-path data/train.parquet --n-trials 200 --timeout 28800  # 8시간
+```
+
+### CatBoost HPO
+```bash
+# GPU 사용
+python hpo_catboost.py --data-path data/train.parquet --n-trials 100 --task-type GPU
+
+# CPU 사용 (colsample_bylevel 포함)
+python hpo_catboost.py --data-path data/train.parquet --n-trials 100 --task-type CPU
+
+# NVTabular 처리된 데이터 사용
+python hpo_catboost.py --data-path result_GBDT_catboost --n-trials 100
+```
+
+### DNN HPO
+```bash
+# 기본 실행
+python hpo_dnn.py --train-path data/train.parquet --n-trials 50 --val-ratio 0.2
+
+# 빠른 테스트 (서브샘플링)
+python hpo_dnn.py --train-path data/train.parquet --n-trials 20 --subsample-ratio 0.1 --max-epochs 5
+
+# 전체 최적화
+python hpo_dnn.py --train-path data/train.parquet --n-trials 100 --max-epochs 15 --timeout 14400
+```
+
+### HPO 명령줄 인자
+
+| 인자 | 설명 | 기본값 |
+|------|------|--------|
+| `--data-path` / `--train-path` | 데이터 경로 | 필수 |
+| `--n-trials` | Optuna 시도 횟수 | 100 (GBDT), 50 (DNN) |
+| `--val-ratio` | Validation 비율 | 0.2 |
+| `--subsample-ratio` | 사용할 데이터 비율 | 1.0 |
+| `--timeout` | 최대 실행 시간 (초) | None |
+| `--max-epochs` | Trial당 최대 에포크 (DNN) | 10 |
+| `--patience` | Early stopping patience (DNN) | 3 |
+
+### 최적화되는 하이퍼파라미터
+
+**XGBoost:**
+- `n_estimators`, `max_depth`, `learning_rate`, `subsample`, `colsample_bytree`
+- `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`, `max_bin`
+
+**CatBoost:**
+- `iterations`, `depth`, `learning_rate`, `subsample`, `l2_leaf_reg`
+- `bootstrap_type`, `bagging_temperature`, `colsample_bylevel` (CPU), `border_count`
+
+**DNN:**
+- `batch_size`, `learning_rate`, `weight_decay`
+- `emb_dim`, `lstm_hidden`, `cross_layers`, `n_layers`, `hidden_size`, `dropout`
+
+### 최적화 후 사용
+
+최적화가 완료되면 `config_*_optimized.yaml` 파일이 생성됩니다.
 
 ```bash
-# 1) 환경 생성
-conda env create -f environment.yaml
-conda activate toss-env-dnn
+# GBDT 최적화 파라미터로 전체 학습
+python train_and_predict_GBDT.py --config config_GBDT_optimized.yaml
 
-# 2) 설치 확인
-python -c "import torch; print('PyTorch:', torch.__version__)"
+# DNN은 생성된 config 파일을 코드에 반영하여 사용
 ```
 
-### GBDT 모델용 환경 (environment_GBDT.yaml)
+### 예상 실행 시간
 
-XGBoost, CatBoost 모델을 위한 환경입니다.
+**XGBoost/CatBoost:**
+- 빠른 테스트 (10% 데이터, 30 trials): 5-15분
+- 중간 최적화 (30% 데이터, 100 trials): 30분-1시간
+- 최종 최적화 (100% 데이터, 200 trials): 2-4시간
 
-```bash
-# 1) 환경 생성
-conda env create -f environment_GBDT.yaml
-conda activate toss-env-gbdt
-
-# 2) 설치 확인
-python -c "import xgboost; import catboost; print('XGBoost:', xgboost.__version__)"
-```
+**DNN:**
+- 빠른 테스트 (10% 데이터, 20 trials, 5 epochs): 10-20분
+- 중간 최적화 (30% 데이터, 50 trials, 10 epochs): 1-2시간
+- 최종 최적화 (100% 데이터, 100 trials, 15 epochs): 3-6시간
 
 ## 📊 데이터 준비
 
-### 데이터 폴더 구조
-
-프로젝트 실행을 위해 다음 데이터 파일들이 `data/` 폴더에 있어야 합니다:
-
+### 필수 데이터
 ```
 data/
-├── train.parquet          # 훈련 데이터 (필수)
-├── test.parquet           # 테스트 데이터 (필수)
-├── missing_data.parquet   # feat_e_3 누락 데이터 (자동 생성)
-├── clicked_1_data.parquet # feat_e_3 존재 + clicked=1 데이터 (자동 생성)
-├── clicked_0_data.parquet # feat_e_3 존재 + clicked=0 데이터 (자동 생성)
-└── train_fold1.parquet    # 9-fold 분할 데이터 (자동 생성)
-    ├── train_fold2.parquet
-    ├── ...
-    └── train_fold9.parquet
+├── train.parquet    # 훈련 데이터 (10.7M rows)
+└── test.parquet     # 테스트 데이터
 ```
 
-### 9-Fold 데이터 분할 전략
-
-대용량 데이터셋의 클래스 불균형 문제를 해결하기 위해 **feat_e_3** 피처를 기준으로 한 밸런싱 전략을 사용합니다:
-
-#### 📈 데이터 분포 분석
-- **전체 데이터**: 10,704,179개 행
-- **feat_e_3 누락**: 1,085,557개 (10.1%) - **1순위 밸런싱 기준**
-- **clicked=1**: 204,179개 (1.9%) - **2순위 밸런싱 기준**  
-- **clicked=0**: 10,500,000개 (98.1%) - **3순위 밸런싱 기준**
-
-#### 🎯 샘플링 전략
-1. **1순위**: `feat_e_3` 누락 데이터 → **모든 fold에 포함** (데이터 부족 방지)
-2. **2순위**: `feat_e_3` 존재 + `clicked=1` → **모든 fold에 포함** (양성 샘플 보존)
-3. **3순위**: `feat_e_3` 존재 + `clicked=0` → **9개 fold로 분할** (9-fold 교차 검증)
-
-#### ⚖️ 밸런싱 고려사항
-- **feat_e_3 누락**이 10%로 상당한 비율이므로 이를 주요 밸런싱 기준으로 사용
-- **clicked=1**은 1.9%로 매우 적어서 모든 fold에 포함하여 데이터 부족 문제 방지
-- **clicked=0**은 98%로 압도적이므로 9개 fold로 분할하여 각 fold의 크기 조절
-
-#### 🔄 Fold 생성 과정
+### 데이터 분할 (Optional)
 ```bash
-# 9-fold 데이터 분할 실행
+# 10-fold 데이터 분할
 python dataset_split.py
 ```
 
-이 스크립트는 다음 과정을 수행합니다:
-1. **파일 확인**: 기존 분류 파일 존재 여부 확인
-2. **데이터 로드/생성**: 기존 파일이 있으면 로드, 없으면 전체 데이터로부터 생성
-3. **데이터 분류**: `feat_e_3` 기준으로 3개 그룹으로 분류
-4. **데이터별 저장**: 각 분류 그룹을 별도 parquet 파일로 저장 (메모리 효율성)
-5. **Fold 생성**: 각 fold별로 데이터를 조합하여 `train_foldX.parquet` 생성
-6. **메모리 정리**: 각 단계마다 메모리 해제
+이 스크립트는 `clicked` 값에 따라 데이터를 분할합니다:
+- `clicked=1`: 모든 fold에 포함 (positive 샘플 보존)
+- `clicked=0`: 10개 fold로 분할
 
-#### 💾 메모리 사용량 가이드
-- **전체 데이터 로드**: 약 **120GB RAM** 필요
-- **기존 파일 사용시**: 필요한 만큼만 로드하여 메모리 절약
-- **전체 데이터 크기**: 10,704,179개 행 (약 10GB parquet 파일)
+## 🎯 피처 설명
 
-> **참고**: 첫 실행 후에는 기존 분류 파일들을 재사용하여 메모리 사용량을 크게 줄일 수 있습니다.
+### 범주형 피처 (5개)
+- `gender`, `age_group`, `inventory_id`, `day_of_week`, `hour`
 
-#### 📊 예상 Fold 크기
-- **Fold 1-8**: 약 1,167,000개 행 (약 935MB)
-- **Fold 9**: 약 1,167,000개 행 (약 935MB) - 나머지 데이터 포함
+### 연속형 피처 (110개)
+- `feat_a_*` (18개)
+- `feat_b_*` (6개)
+- `feat_c_*` (8개)
+- `feat_d_*` (6개)
+- `feat_e_*` (10개)
+- `history_a_*` (7개)
+- `history_b_*` (30개)
+- `l_feat_*` (25개, `l_feat_20`, `l_feat_23` 제외)
 
-## 📋 dataset_split.py 상세 가이드
+### 시퀀스 피처 (DNN만 사용)
+- `seq`: 가변 길이 시퀀스 데이터
 
-### 🎯 스크립트 목적
-`dataset_split.py`는 대용량 데이터셋(10,704,179개 행)을 메모리 효율적으로 처리하여 9-fold 교차 검증용 데이터로 분할합니다.
-
-### 💾 메모리 관리 전략
-- **스마트 파일 관리**: 기존 분류 파일이 있으면 바로 로드, 없으면 생성
-- **전체 데이터 로드**: 한 번에 전체 데이터를 로드하여 효율적 처리
-- **데이터별 저장**: 각 분류 그룹을 별도 parquet 파일로 저장하여 메모리 사용량 최소화
-- **실시간 모니터링**: 각 단계별 메모리 사용량 추적 및 해제
-
-### ⚙️ 실행 옵션
-
-#### 기본 실행
-```bash
-python dataset_split.py
-```
-- **예상 메모리 사용량**: 약 120GB RAM
-- **처리 방식**: 전체 데이터 한번에 로드 후 분류
-
-#### 재실행 (기존 파일 존재시)
-```bash
-python dataset_split.py
-```
-- **메모리 사용량**: 필요한 만큼만 (훨씬 적음)
-- **처리 시간**: 매우 빠름 (분류 파일 재사용)
-
-
-### 📊 처리 과정 및 진행 상황
-1. **파일 확인**: 기존 분류 파일 존재 여부 확인
-2. **데이터 로드/생성**: 기존 파일이 있으면 로드, 없으면 전체 데이터로부터 생성
-3. **데이터 분류**: feat_e_3 기준으로 3개 그룹 분류 및 저장
-4. **Fold 생성**: 9-fold 교차 검증용 데이터 조합 및 생성
-5. **메모리 모니터링**: 각 단계별 실시간 메모리 사용량 추적
-
-### 🚨 주의사항
-- **메모리 모니터링**: 실행 중 메모리 사용량을 모니터링하세요
-- **디스크 공간**: 생성될 파일들이 약 1-2GB 추가 공간 필요
-- **처리 시간**: 전체 데이터 처리에 30분~2시간 소요 (시스템 성능에 따라)
-
-## 🚀 사용 방법
-
-### 1. 데이터 준비 (필수)
-
-#### 9-Fold 데이터 분할
-```bash
-# feat_e_3 기준으로 9-fold 데이터 분할
-python dataset_split.py
-```
-
-#### 전체 데이터 분석 및 통계 계산
-```bash
-# 전체 데이터 청크 분석
-python analysis/chunk_eda.py
-
-# 피처 품질 분석
-python analysis/feature_quality_analysis.py
-
-# 정규화 통계 계산
-python analysis/compute_normalization_stats.py
-```
-
-#### 훈련 데이터 전처리 및 텐서 저장
-```bash
-# train.parquet를 전처리하고 텐서로 저장
-python preprocess_train_data.py
-```
-
-이 스크립트는 다음 작업을 수행합니다:
-- `train.parquet` 파일 로드
-- ID를 0부터 시작하도록 재할당
-- FeatureProcessor로 피처 전처리
-- 텐서 형태로 `data/` 폴더에 저장
-
-### 2. 모델 훈련 및 예측
-
-#### 원클릭 실행 (추천)
-```bash
-# TabularSeq/TabularTransformer 모델: 전처리된 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
-python train_and_predict.py
-
-# XGBoost 모델: 전체 데이터로 훈련 → 예측 → 결과 저장을 한 번에 실행
-python train_and_predict_xgboost.py --config config_xgboost.yaml
-
-# NVIDIA Merlin 기반 고성능 모델: GPU 가속으로 훈련 → 예측 → 결과 저장을 한 번에 실행
-python train_and_predict_merlin.py --config config_fold1.yaml --use-merlin --model-type transformer
-```
-
-#### 단계별 실행
-```bash
-# TabularSeq/TabularTransformer 모델
-python train.py
-python predict.py
-
-# XGBoost 모델 테스트
-python test_xgboost.py
-
-# NVIDIA Merlin 데이터로더 테스트
-python test_merlin_dataloader.py
-```
-
-### 3. 전처리된 데이터 사용
-
-전처리된 데이터를 사용하면 다음과 같은 장점이 있습니다:
-- ✅ **빠른 로딩**: 텐서로 미리 변환되어 로딩 속도 향상
-- ✅ **메모리 효율성**: 필요한 데이터만 로드
-- ✅ **일관성**: 동일한 전처리 파이프라인 보장
-- ✅ **재사용성**: 여러 실험에서 동일한 전처리된 데이터 사용
-
-### 3. 모델 선택
-
-#### TabularSeq/TabularTransformer/WideDeepCTR 모델
-`config.yaml`에서 모델 타입을 선택할 수 있습니다:
-
-```yaml
-MODEL_TYPE: "transformer"  # "transformer", "widedeep", "tabular_seq"
-
-MODEL:
-  # TabularTransformer 모델 설정
-  TRANSFORMER:
-    HIDDEN_DIM: 192
-    N_HEADS: 8
-    N_LAYERS: 3
-    FFN_SIZE_FACTOR: 1.333
-    ATTENTION_DROPOUT: 0.2
-    FFN_DROPOUT: 0.1
-    RESIDUAL_DROPOUT: 0.0
-  
-  # WideDeepCTR 모델 설정
-  WIDEDEEP:
-    EMB_DIM: 16
-    LSTM_HIDDEN: 64
-    HIDDEN_UNITS: [512, 256, 128]
-    DROPOUT: [0.1, 0.2, 0.3]
-```
-
-#### XGBoost 모델
-`config_xgboost.yaml`에서 XGBoost 모델을 설정할 수 있습니다:
-
-```yaml
-MODEL:
-  XGBOOST:
-    N_ESTIMATORS: 1000        # 부스팅 라운드 수
-    MAX_DEPTH: 6              # 트리의 최대 깊이
-    LEARNING_RATE: 0.1        # 학습률
-    SUBSAMPLE: 0.8            # 샘플링 비율
-    COLSAMPLE_BYTREE: 0.8     # 피처 샘플링 비율
-    REG_ALPHA: 0.1            # L1 정규화
-    REG_LAMBDA: 1.0           # L2 정규화
-    RANDOM_STATE: 42          # 랜덤 시드
-    N_JOBS: -1                # 병렬 처리 스레드 수
-    EARLY_STOPPING_ROUNDS: 50 # 조기 종료 라운드
-    EVAL_METRIC: "rmse"       # 평가 메트릭
-```
-
-## 🧠 모델 아키텍처
-
-### TabularSeq 모델 (기존)
-- **구조**: LSTM + MLP
-- **입력**: 수치형 피처 + 시퀀스 피처
-- **특징**: 간단하고 빠른 훈련
-
-### TabularTransformer 모델 (신규)
-- **구조**: Transformer Encoder + LSTM + MLP
-- **입력**: 범주형 + 수치형 + 시퀀스 피처 (분리 처리)
-- **특징**: 
-  - 범주형 피처: Embedding (0 ~ cardinality-1)
-  - 수치형 피처: Linear Projection + 표준화
-  - 시퀀스 피처: LSTM + Projection
-  - 누락값: 학습 가능한 NaN 토큰
-  - Column Embeddings + Class Token
-  - 3-layer Transformer (192 dim, 8 heads)
-
-### WideDeepCTR 모델 (신규)
-- **구조**: Cross Network + Deep MLP + LSTM
-- **입력**: 범주형 + 수치형 + 시퀀스 피처
-- **특징**:
-  - 범주형 피처: Embedding
-  - 수치형 피처: Batch Normalization
-  - 시퀀스 피처: Bidirectional LSTM
-  - Cross Network: 피처 간 교차 상호작용 학습
-  - Deep MLP: 다층 신경망으로 복잡한 패턴 학습
-
-### XGBoost 모델 (신규)
-- **구조**: Gradient Boosting Machine
-- **입력**: 범주형 + 수치형 피처 (시퀀스 피처 제외)
-- **특징**: 
-  - 범주형 피처: Label Encoding
-  - 수치형 피처: 원본 값 사용
-  - 시퀀스 피처: 사용하지 않음
-  - 조기 종료: 내장 early stopping 사용
-  - 병렬 처리: 멀티스레드 지원
-
-### NVIDIA Merlin 통합 (신규)
-- **구조**: GPU 가속 테이블 데이터 처리 파이프라인
-- **입력**: 범주형 + 수치형 + 시퀀스 피처 (GPU에서 처리)
-- **특징**: 
-  - GPU 메모리 최적화: cuDF 기반 데이터 처리
-  - 고성능 피처 엔지니어링: Merlin 워크플로우
-  - 자동 데이터 타입 최적화: GPU 친화적 데이터 변환
-  - 병렬 처리: 멀티 GPU 지원
-  - 메모리 효율성: 대용량 데이터 청크 처리
-  - 호환성: Merlin 미설치 시 표준 PyTorch로 자동 전환
-
-## 📊 데이터 처리
-
-### 1. 데이터 분석 단계
-- **전체 데이터 EDA**: `analysis/chunk_eda.py`로 대용량 데이터 분석
-- **피처 품질 분석**: `analysis/feature_quality_analysis.py`로 피처 특성 파악
-- **정규화 통계 계산**: `analysis/compute_normalization_stats.py`로 표준화 통계 생성
-
-### 2. 데이터 전처리 단계
-- **피처 분류 (자동)**: 
-  - **범주형**: `gender`, `age_group`, `inventory_id`, `day_of_week`, `hour`
-  - **수치형**: 나머지 모든 피처 (제외: 범주형, 시퀀스, ID, target)
-  - **시퀀스**: `seq` (문자열 파싱)
-  - **제외**: `l_feat_20`, `l_feat_23` (상수 피처)
-
-- **전처리 파이프라인**:
-  1. **범주형**: 고유값 정렬 → 0부터 연속 정수 매핑
-  2. **수치형**: Z-score 표준화 (미리 계산된 통계 사용)
-  3. **시퀀스**: 문자열 파싱 → 패딩 → LSTM 처리
-  4. **누락값**: NaN 마스크 생성 → NaN 토큰으로 대체
-
-### 3. 텐서 저장
-- **범주형 피처**: `x_categorical.pt` (LongTensor)
-- **수치형 피처**: `x_numerical.pt` (FloatTensor)
-- **시퀀스 피처**: `sequences.pt` (List[Tensor])
-- **NaN 마스크**: `nan_mask.pt` (FloatTensor)
-- **타겟**: `targets.pt` (FloatTensor)
-- **ID**: `ids.pt` (LongTensor)
-- **전처리 파이프라인**: `feature_processor.pt` (재사용용)
+### 제외 피처
+- `l_feat_20`, `l_feat_23` (상수 값)
 
 ## 📈 평가 메트릭
 
+대회 메트릭: `Score = 0.5 * AP + 0.5 * (1 / (1 + WLL))`
+
 - **AP (Average Precision)**: 50% 가중치
-- **WLL (Weighted LogLoss)**: 50% 가중치  
-- **Score**: `0.5 * AP + 0.5 * (1 / (1 + WLL))`
+- **WLL (Weighted LogLoss)**: 50% 가중치 (클래스 50:50 균형)
 
-## 📁 출력 파일
+## 💾 메모리 및 성능
 
-### 전처리된 데이터 (`data/`)
-- `x_categorical.pt`: 범주형 피처 텐서
-- `x_numerical.pt`: 수치형 피처 텐서
-- `sequences.pt`: 시퀀스 피처 텐서
-- `nan_mask.pt`: NaN 마스크 텐서
-- `targets.pt`: 타겟 텐서
-- `ids.pt`: ID 텐서
-- `feature_processor.pt`: 전처리 파이프라인
-- `metadata.json`: 메타데이터
+### GBDT 모델
+- **GPU 메모리**: 10-14GB (RTX 3090 기준)
+- **System RAM**: 32GB+ 권장
+- **처리 속도**: 전체 데이터 단일 학습 약 10-30분
 
-### 훈련 결과
-- `trained_model_{datetime}.pth`: 훈련된 모델
-- `baseline_submit_{datetime}.csv`: 제출 파일
-- `metadata_{datetime}.json`: 메타데이터
+### DNN 모델
+- **GPU 메모리**: 24GB per GPU (4 GPUs 권장)
+- **System RAM**: 64GB+ 권장
+- **처리 속도**: 5 epochs 약 30분-1시간
 
-### 로그 파일
-- `train_logs.csv`: 훈련 로그
-- `gradient_norms.csv`: 그래디언트 모니터링
+## 🔍 데이터 분석
 
-### 분석 결과 (`analysis/results/`)
-- `chunk_eda_results.json`: 전체 데이터 분석
-- `normalization_stats.json`: 정규화 통계
-- `feature_quality_analysis.json`: 피처 품질 분석
+`analysis/` 디렉토리에 데이터 분석 스크립트가 포함되어 있습니다. 자세한 내용은 `analysis/README.md`를 참조하세요.
 
-## ⚙️ 설정 옵션
+**주요 분석 도구:**
+- `chunk_eda.py`: 대용량 데이터 EDA (청크 단위 처리)
+- `feature_quality_analysis.py`: 피처 품질 분석
+- `compute_normalization_stats.py`: 표준화 통계 계산
+- Missing pattern 분석 스크립트
 
-### 데이터 샘플링
-```yaml
-DATA:
-  USE_SAMPLING: true
-  SAMPLE_SIZE: 1000000  # 샘플 크기
+## 📝 주요 업데이트
+
+- **2025-10-08**: MixUp 데이터 증강 기법 추가 (GBDT/DNN 모두 지원)
+- **2025-10-08**: 통합 환경 (environment.yaml) 구성 - RAPIDS + PyTorch 단일 환경
+- **2025-01-08**: Cross-validation → Train/Val split 변경 (validation ratio 0.1)
+- **2025-01-08**: 코드 정리 및 구조화, 공통 함수 통합
+- **2024-12-31**: HPO (하이퍼파라미터 최적화) 스크립트 추가
+- **2024-12-30**: GBDT 모델 (XGBoost/CatBoost) 추가
+- **2024-12-29**: DNN 멀티 GPU (DDP) 지원 추가
+
+## 🐛 문제 해결
+
+### torch 모듈을 찾을 수 없는 경우
+```bash
+# 통합 환경 재설치
+conda env remove -n toss-env
+conda env create -f environment.yaml
+conda activate toss-env
 ```
 
-### 조기 종료
-```yaml
-EARLY_STOPPING:
-  ENABLED: true
-  PATIENCE: 5
-  MONITOR: "val_score"
+### GPU 메모리 부족
+```bash
+# GBDT: 데이터 서브샘플링 또는 작은 batch_size 사용
+python train_and_predict_GBDT.py --val-ratio 0.1  # validation 비율 줄이기
+
+# DNN: GPU 개수 조정 또는 batch size 감소
+CUDA_VISIBLE_DEVICES=0,1 python train_and_predict_dnn_ddp.py
 ```
 
-### 그래디언트 모니터링
-```yaml
-GRADIENT_NORM:
-  ENABLED: true
-  COMPONENTS: ["lstm", "mlp", "total"]
-```
+### cuDF string limit 에러
+Raw parquet 파일 사용 시 자동으로 `seq` 컬럼이 제외됩니다.
 
-## 🔧 주요 기능
+## 🤝 참고사항
 
-- ✅ **모듈화된 구조**: 각 기능별로 파일 분리
-- ✅ **YAML 설정 관리**: 설정 파일로 쉬운 실험
-- ✅ **설정 검증**: 잘못된 키 자동 감지
-- ✅ **메모리 효율적**: 대용량 데이터 청크 처리
-- ✅ **재현성**: 시드 고정으로 일관된 결과
-- ✅ **자동화**: 원클릭 훈련+예측 워크플로우
-- ✅ **모니터링**: 그래디언트 및 훈련 상태 추적
-
-## 🚨 주의사항
-
-1. **메모리 사용량**: 대용량 데이터 처리 시 충분한 RAM 필요
-2. **GPU 사용**: Transformer 모델은 GPU에서 더 효율적
-3. **피처 분류**: `chunk_eda_results.json` 기반으로 자동 분류
-4. **정규화 통계**: `normalization_stats.json` 필요 (자동 생성)
-
-
-## 📚 참고 논문
-
-- **FT-Transformer**: "Revisiting Deep Learning Models for Tabular Data" (NeurIPS 2021)
-- **Tabular Data**: Transformer 아키텍처를 테이블 데이터에 적용한 연구
-
-## 🤝 기여
-
-이슈나 개선사항이 있으면 언제든지 알려주세요!
+- 모든 스크립트는 단일 통합 환경 (`toss-env`)에서 실행됩니다
+- GBDT와 DNN 모델 모두 동일한 conda 환경 사용
+- GPU는 필수이며, CUDA 11.8+ 환경 권장
+- 데이터 분석 도구는 `analysis/README.md` 참조

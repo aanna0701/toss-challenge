@@ -1,18 +1,26 @@
 import pandas as pd
 import numpy as np
-import os, random
+import os
 import json
-from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 import csv
 from datetime import datetime
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from lightning.fabric import Fabric
+
+# Import common functions
+from utils import seed_everything, calculate_competition_score
+from data_loader import (
+    ClickDatasetDNN,
+    collate_fn_dnn_train,
+    collate_fn_dnn_infer,
+    encode_categoricals_dnn
+)
+from mixup import mixup_batch_torch
 
 # Set CUDA_VISIBLE_DEVICES
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,6,7'
@@ -25,17 +33,11 @@ CFG = {
     'NUM_DEVICES': 4,  # Use 4 GPUs out of 7 available (will use GPUs 1,2,3,4)
     'STRATEGY': 'ddp',
     'VAL_RATIO': 0.1,
-    'LOG_INTERVAL': 100  # Log every 100 steps
+    'LOG_INTERVAL': 100,  # Log every 100 steps
+    'USE_MIXUP': True,    # Enable MixUp augmentation
+    'MIXUP_ALPHA': 0.3,   # Beta distribution parameter (0.3 recommended)
+    'MIXUP_PROB': 0.5     # Probability of applying MixUp to a batch
 }
-
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 seed_everything(CFG['SEED'])
 
@@ -50,139 +52,15 @@ fabric.launch()
 
 fabric.print(f"Fabric initialized - Global Rank: {fabric.global_rank}, Local Rank: {fabric.local_rank}, World Size: {fabric.world_size}")
 
-# Metric functions (from GBDT script)
-def calculate_weighted_logloss(y_true, y_pred, eps=1e-15):
-    """Calculate Weighted LogLoss with 50:50 class weights"""
-    y_pred = np.clip(y_pred, eps, 1 - eps)
-    
-    mask_0 = (y_true == 0)
-    mask_1 = (y_true == 1)
-    
-    ll_0 = -np.mean(np.log(1 - y_pred[mask_0])) if mask_0.sum() > 0 else 0
-    ll_1 = -np.mean(np.log(y_pred[mask_1])) if mask_1.sum() > 0 else 0
-    
-    return 0.5 * ll_0 + 0.5 * ll_1
+def worker_init_fn(worker_id):
+    os.sched_setaffinity(0, range(os.cpu_count()))
 
-def calculate_competition_score(y_true, y_pred):
-    """Calculate competition score: 0.5*AP + 0.5*(1/(1+WLL))"""
-    ap = average_precision_score(y_true, y_pred)
-    wll = calculate_weighted_logloss(y_true, y_pred)
-    score = 0.5 * ap + 0.5 * (1 / (1 + wll))
-    return score, ap, wll
-
-fabric.print("데이터 로드 시작")
-train = pd.read_parquet("data/train.parquet", engine="pyarrow")
-test = pd.read_parquet("data/test.parquet", engine="pyarrow")
-fabric.print(f"Train shape: {train.shape}")
-fabric.print(f"Test shape: {test.shape}")
-fabric.print("데이터 로드 완료")
-
-target_col = "clicked"
-seq_col = "seq"
-FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
-feature_cols = [c for c in train.columns if c not in FEATURE_EXCLUDE]
-
-cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
-num_cols = [c for c in feature_cols if c not in cat_cols]
-fabric.print(f"Num features: {len(num_cols)} | Cat features: {len(cat_cols)}")
-
-def encode_categoricals(train_df, test_df, cat_cols):
-    encoders = {}
-    for col in cat_cols:
-        le = LabelEncoder()
-        all_values = pd.concat([train_df[col], test_df[col]], axis=0).astype(str).fillna("UNK")
-        le.fit(all_values)
-        train_df[col] = le.transform(train_df[col].astype(str).fillna("UNK"))
-        test_df[col]  = le.transform(test_df[col].astype(str).fillna("UNK"))
-        encoders[col] = le
-        fabric.print(f"{col} unique categories: {len(le.classes_)}")
-    return train_df, test_df, encoders
-
-train, test, cat_encoders = encode_categoricals(train, test, cat_cols)
-
-# Split train into train and validation
-if fabric.global_rank == 0:
-    print(f"\n데이터 분할 시작 (Validation ratio: {CFG['VAL_RATIO']:.1%})")
-train_df, val_df = train_test_split(
-    train, 
-    test_size=CFG['VAL_RATIO'], 
-    random_state=CFG['SEED'],
-    stratify=train[target_col]
-)
-if fabric.global_rank == 0:
-    print(f"Train set: {len(train_df):,} samples")
-    print(f"Val set: {len(val_df):,} samples")
-    print(f"Val positive ratio: {val_df[target_col].mean():.4f}")
-
-# Load normalization statistics
-with open('analysis/results/normalization_stats.json', 'r', encoding='utf-8') as f:
-    norm_stats_data = json.load(f)
-    norm_stats = norm_stats_data['statistics']
-fabric.print("정규화 통계 로드 완료")
-
-class ClickDataset(Dataset):
-    def __init__(self, df, num_cols, cat_cols, seq_col, norm_stats, target_col=None, has_target=True):
-        self.df = df.reset_index(drop=True)
-        self.num_cols = num_cols
-        self.cat_cols = cat_cols
-        self.seq_col = seq_col
-        self.target_col = target_col
-        self.has_target = has_target
-        
-        # Standardize numerical features using normalization_stats.json
-        num_data = self.df[self.num_cols].astype(float)
-        for col in self.num_cols:
-            if col in norm_stats:
-                mean = norm_stats[col]['mean']
-                std = norm_stats[col]['std']
-                # Avoid division by zero
-                if std > 0:
-                    num_data[col] = (num_data[col] - mean) / std
-        self.num_X = num_data.fillna(0).values
-        
-        self.cat_X = self.df[self.cat_cols].astype(int).values
-        self.seq_strings = self.df[self.seq_col].astype(str).values
-        if self.has_target:
-            self.y = self.df[self.target_col].astype(np.float32).values
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        num_x = torch.tensor(self.num_X[idx], dtype=torch.float)
-        cat_x = torch.tensor(self.cat_X[idx], dtype=torch.long)
-        s = self.seq_strings[idx]
-        if s:
-            arr = np.fromstring(s, sep=",", dtype=np.float32)
-        else:
-            arr = np.array([0.0], dtype=np.float32)
-        seq = torch.from_numpy(arr)
-        if self.has_target:
-            y = torch.tensor(self.y[idx], dtype=torch.float)
-            return num_x, cat_x, seq, y
-        else:
-            return num_x, cat_x, seq
-
-def collate_fn_train(batch):
-    num_x, cat_x, seqs, ys = zip(*batch)
-    num_x = torch.stack(num_x)
-    cat_x = torch.stack(cat_x)
-    ys = torch.stack(ys)
-    seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
-    seq_lengths = torch.clamp(seq_lengths, min=1)
-    return num_x, cat_x, seqs_padded, seq_lengths, ys
-
-def collate_fn_infer(batch):
-    num_x, cat_x, seqs = zip(*batch)
-    num_x = torch.stack(num_x)
-    cat_x = torch.stack(cat_x)
-    seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
-    seq_lengths = torch.clamp(seq_lengths, min=1)
-    return num_x, cat_x, seqs_padded, seq_lengths
+# ============================================================================
+# 모델 아키텍처
+# ============================================================================
 
 class CrossNetwork(nn.Module):
+    """Cross Network for WideDeepCTR model"""
     def __init__(self, input_dim, num_layers=2):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -195,7 +73,9 @@ class CrossNetwork(nn.Module):
             x = x0 * w(x) + x
         return x
 
+
 class WideDeepCTR(nn.Module):
+    """Wide & Deep CTR 모델"""
     def __init__(self, num_features, cat_cardinalities, emb_dim=16, lstm_hidden=64,
                  hidden_units=None, dropout=None):
         super().__init__()
@@ -235,6 +115,46 @@ class WideDeepCTR(nn.Module):
         out = self.mlp(z_cross)
         return out.squeeze(1)
 
+# ============================================================================
+
+fabric.print("데이터 로드 시작")
+train = pd.read_parquet("data/train.parquet", engine="pyarrow")
+test = pd.read_parquet("data/test.parquet", engine="pyarrow")
+fabric.print(f"Train shape: {train.shape}")
+fabric.print(f"Test shape: {test.shape}")
+fabric.print("데이터 로드 완료")
+
+target_col = "clicked"
+seq_col = "seq"
+FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
+feature_cols = [c for c in train.columns if c not in FEATURE_EXCLUDE]
+
+cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
+num_cols = [c for c in feature_cols if c not in cat_cols]
+fabric.print(f"Num features: {len(num_cols)} | Cat features: {len(cat_cols)}")
+
+train, test, cat_encoders = encode_categoricals_dnn(train, test, cat_cols)
+
+# Split train into train and validation
+if fabric.global_rank == 0:
+    print(f"\n데이터 분할 시작 (Validation ratio: {CFG['VAL_RATIO']:.1%})")
+train_df, val_df = train_test_split(
+    train, 
+    test_size=CFG['VAL_RATIO'], 
+    random_state=CFG['SEED'],
+    stratify=train[target_col]
+)
+if fabric.global_rank == 0:
+    print(f"Train set: {len(train_df):,} samples")
+    print(f"Val set: {len(val_df):,} samples")
+    print(f"Val positive ratio: {val_df[target_col].mean():.4f}")
+
+# Load normalization statistics
+with open('analysis/results/normalization_stats.json', 'r', encoding='utf-8') as f:
+    norm_stats_data = json.load(f)
+    norm_stats = norm_stats_data['statistics']
+fabric.print("정규화 통계 로드 완료")
+
 def evaluate_model(fabric, model, val_loader, criterion):
     """Evaluate model on validation set (only on rank 0)"""
     model.eval()
@@ -261,16 +181,18 @@ def evaluate_model(fabric, model, val_loader, criterion):
     
     return val_loss, score, ap, wll
 
-def train_model(fabric, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, batch_size, epochs, lr, log_interval, save_dir):
+def train_model(fabric, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, batch_size, epochs, lr, log_interval, save_dir, use_mixup=False, mixup_alpha=0.3, mixup_prob=0.5):
     """Train model with validation and logging (only rank 0 logs)"""
     # Create datasets and loaders
-    train_dataset = ClickDataset(train_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
-    val_dataset = ClickDataset(val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
+    train_dataset = ClickDatasetDNN(train_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
+    val_dataset = ClickDatasetDNN(val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_fn_train, pin_memory=True, num_workers=4)
+                              collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
+                              worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            collate_fn=collate_fn_train, pin_memory=True, num_workers=4)
+                            collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
+                            worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     
     # Create model
     cat_cardinalities = [len(cat_encoders[c].classes_) for c in cat_cols]
@@ -313,6 +235,10 @@ def train_model(fabric, train_df, val_df, num_cols, cat_cols, seq_col, norm_stat
         
         print(f"학습 시작 (로그 저장: {log_file})")
         print(f"Log interval: {log_interval} steps")
+        if use_mixup:
+            print(f"MixUp enabled: alpha={mixup_alpha}, prob={mixup_prob}")
+        else:
+            print("MixUp disabled")
     else:
         log_file = None
     
@@ -335,8 +261,19 @@ def train_model(fabric, train_df, val_df, num_cols, cat_cols, seq_col, norm_stat
             
         for num_x, cat_x, seqs, lens, ys in pbar:
             optimizer.zero_grad()
-            logits = model(num_x, cat_x, seqs, lens)
-            loss = criterion(logits, ys)
+            
+            # Apply MixUp with probability if enabled
+            if use_mixup and np.random.rand() < mixup_prob:
+                # MixUp for numerical features
+                num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=fabric.device)
+                
+                # For categorical and sequence features, we keep them from the first sample
+                # (MixUp on categorical/sequence is less straightforward)
+                logits = model(num_x_mixed, cat_x, seqs, lens)
+                loss = criterion(logits, ys_mixed)
+            else:
+                logits = model(num_x, cat_x, seqs, lens)
+                loss = criterion(logits, ys)
             
             # Use fabric.backward instead of loss.backward()
             fabric.backward(loss)
@@ -428,15 +365,19 @@ model, best_score = train_model(
     epochs=CFG['EPOCHS'],
     lr=CFG['LEARNING_RATE'],
     log_interval=CFG['LOG_INTERVAL'],
-    save_dir=save_dir
+    save_dir=save_dir,
+    use_mixup=CFG['USE_MIXUP'],
+    mixup_alpha=CFG['MIXUP_ALPHA'],
+    mixup_prob=CFG['MIXUP_PROB']
 )
 
 # Inference only on rank 0
 if fabric.global_rank == 0:
     fabric.print("추론 시작 (Rank 0에서만 실행)")
-    test_dataset = ClickDataset(test, num_cols, cat_cols, seq_col, norm_stats, has_target=False)
+    test_dataset = ClickDatasetDNN(test, num_cols, cat_cols, seq_col, norm_stats, has_target=False)
     test_loader = DataLoader(test_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False,
-                             collate_fn=collate_fn_infer, pin_memory=True, num_workers=4)
+                             collate_fn=collate_fn_dnn_infer, pin_memory=True, num_workers=4,
+                             worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     
     model.eval()
     outs = []
