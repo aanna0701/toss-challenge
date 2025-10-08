@@ -77,7 +77,7 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_ro
     
     # MixUp hyperparameters (if enabled)
     if use_mixup:
-        mixup_alpha = trial.suggest_float('mixup_alpha', 0, 0.5, step=0.1)
+        mixup_alpha = trial.suggest_float('mixup_alpha', 0.01, 0.3)
         mixup_ratio = 0.6
         
         # Apply MixUp
