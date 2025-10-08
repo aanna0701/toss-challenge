@@ -1,0 +1,36 @@
+# Example configuration for DNN training
+# This file shows how to structure HPO results for train_dnn_ddp.py
+
+# Basic training parameters
+BATCH_SIZE: 1024
+EPOCHS: 10
+LEARNING_RATE: 0.001
+WEIGHT_DECAY: 0.00005
+
+# MixUp augmentation
+USE_MIXUP: true
+MIXUP_ALPHA: 0.3
+MIXUP_PROB: 0.5
+
+# Note: Calibration is now performed during prediction (pred_dnn_ddp.py automatically finds best method)
+
+# Model architecture
+MODEL:
+  EMB_DIM: 32
+  LSTM_HIDDEN: 64
+  HIDDEN_UNITS: [512, 256, 128]
+  DROPOUT: [0.1, 0.2, 0.3]
+  CROSS_LAYERS: 2
+
+# Note: If using HPO results (best_params format), the structure would be:
+# best_score: 0.875432
+# best_params:
+#   learning_rate: 0.001234
+#   weight_decay: 0.000056
+#   emb_dim: 32
+#   lstm_hidden: 64
+#   cross_layers: 2
+#   n_layers: 3
+#   mixup_alpha: 0.3
+#   mixup_prob: 0.5
+

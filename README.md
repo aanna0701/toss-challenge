@@ -4,385 +4,449 @@
 
 ## 🚀 빠른 시작
 
-### 1. 환경 설정 (통합 환경)
+### 1. 환경 설정
 ```bash
-# 단일 통합 환경으로 GBDT와 DNN 모두 사용 가능
 conda env create -f environment.yaml
 conda activate toss-env
 ```
 
-### 2. GBDT 모델 실행
+### 2. 데이터 분할
 ```bash
-# XGBoost 기본 실행
-python train_and_predict_GBDT.py
-
-# CatBoost 사용
-python train_and_predict_GBDT.py --config config_GBDT.yaml --preset catboost_deep
-
-# Validation ratio 변경
-python train_and_predict_GBDT.py --val-ratio 0.2
+# train.parquet → train_t (80%) / train_v (10%) / train_c (10%)
+python dataset_split.py
 ```
 
-### 3. DNN 모델 실행
+### 3. 모델 학습
 ```bash
-# 멀티 GPU 훈련 (DDP)
-python train_and_predict_dnn_ddp.py
+# GBDT (XGBoost)
+python train_gbdt.py
+
+# DNN (멀티 GPU)
+python train_dnn_ddp.py
+```
+
+### 4. 예측
+```bash
+# GBDT (자동 calibration 포함)
+python pred_gbdt.py --model-dir result_GBDT_xgboost/20231201_120000
+
+# DNN (자동 calibration 포함)
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000
 ```
 
 ## 📁 프로젝트 구조
 
 ```
 toss-challenge/
-├── train_and_predict_GBDT.py    # GBDT 모델 훈련 및 예측
-├── train_and_predict_dnn_ddp.py # DNN 멀티 GPU 훈련
-├── hpo_xgboost.py               # XGBoost 하이퍼파라미터 최적화
-├── hpo_catboost.py              # CatBoost 하이퍼파라미터 최적화
-├── hpo_dnn.py                   # DNN 하이퍼파라미터 최적화
-├── dataset_split.py             # 데이터셋 10-fold 분할
+├── train_gbdt.py                # GBDT 모델 훈련
+├── pred_gbdt.py                 # GBDT 모델 예측 + 자동 calibration
+├── train_dnn_ddp.py             # DNN 멀티 GPU 훈련
+├── pred_dnn_ddp.py              # DNN 모델 예측 + 자동 calibration
+├── hpo_xgboost.py               # XGBoost HPO
+├── hpo_catboost.py              # CatBoost HPO
+├── hpo_dnn.py                   # DNN HPO
+├── dataset_split.py             # 데이터 분할 (train/val/cal)
 ├── utils.py                     # 공통 유틸리티 함수
-├── data_loader.py               # 데이터 로더 (DNN + GBDT)
-├── mixup.py                     # MixUp 데이터 증강 함수
-├── config_GBDT.yaml            # GBDT 설정 파일
-├── environment.yaml            # 통합 conda 환경 설정
-├── analysis/                   # 데이터 분석 스크립트 (별도 README 참조)
-└── data/                       # 데이터 디렉토리
-    ├── train.parquet           # 훈련 데이터 (필수)
-    └── test.parquet            # 테스트 데이터 (필수)
+├── data_loader.py               # 데이터 로더
+├── mixup.py                     # MixUp 데이터 증강
+├── config_GBDT.yaml             # GBDT 설정
+├── config_dnn_example.yaml      # DNN 설정 예시
+├── environment.yaml             # Conda 환경
+└── data/
+    ├── train.parquet            # 원본 (10.7M rows)
+    ├── train_t.parquet          # 훈련 (80%)
+    ├── train_v.parquet          # 검증 (10%)
+    ├── train_c.parquet          # 캘리브레이션 (10%)
+    └── test.parquet             # 테스트
 ```
 
-## 🔧 환경 설정
+## 🛠️ GBDT 모델
 
-### 통합 환경 (environment.yaml)
-단일 conda 환경으로 GBDT와 DNN 모델을 모두 실행할 수 있습니다.
-
-**주요 라이브러리:**
-- Python 3.10
-- **RAPIDS 스택**: cudf, nvtabular, cupy (GPU 가속 데이터 처리)
-- **GBDT 모델**: XGBoost, CatBoost
-- **딥러닝**: PyTorch, Lightning (pip 설치로 GPU 호환성 최적화)
-- **데이터 처리**: pandas, numpy, scikit-learn, dask
-
-**설치:**
+### 학습
 ```bash
-conda env create -f environment.yaml
-conda activate toss-env
-```
-
-**기존 환경 업데이트:**
-```bash
-conda activate toss-env
-conda env update -f environment.yaml --prune
-```
-
-## 🛠️ GBDT 모델 사용법
-
-### 기본 실행
-```bash
-# XGBoost (기본, 10% validation)
-python train_and_predict_GBDT.py
+# XGBoost 기본 실행
+python train_gbdt.py
 
 # CatBoost 사용
-python train_and_predict_GBDT.py --config config_GBDT.yaml
+python train_gbdt.py --preset catboost_deep
 
-# Validation ratio 변경
-python train_and_predict_GBDT.py --val-ratio 0.2
-
-# 데이터 재처리 강제
-python train_and_predict_GBDT.py --force-reprocess
+# 데이터 재처리
+python train_gbdt.py --force-reprocess
 ```
 
-### MixUp Data Augmentation
-MixUp은 두 샘플을 선형 보간하여 새로운 학습 샘플을 생성하는 데이터 증강 기법입니다. 특히 불균형 데이터셋에서 효과적입니다.
-
+### 예측
 ```bash
-# config_GBDT.yaml에서 설정
-training:
-  use_mixup: true      # MixUp 활성화
-  mixup_alpha: 0.3     # Beta 분포 파라미터 (0.3 권장)
-  mixup_ratio: 0.5     # 추가할 MixUp 샘플 비율 (0.5 = 50% 증가)
-```
+# 자동 calibration (기본값 - 권장)
+python pred_gbdt.py --model-dir result_GBDT_xgboost/20231201_120000
 
-**MixUp 파라미터:**
-- `alpha`: Beta(α, α) 분포에서 mixing coefficient λ를 샘플링
-  - α=1.0: 균등한 mixing
-  - α<1.0: 원본 샘플 선호 (0.3 권장)
-  - α>1.0: 균형잡힌 mixing 선호
-- `ratio`: 추가할 MixUp 샘플의 비율
-  - 0.5: 원본의 50% 추가 (1.5배 데이터)
-  - 1.0: 원본과 동일 개수 추가 (2배 데이터)
+# Calibration 비활성화
+python pred_gbdt.py --model-dir result_GBDT_xgboost/20231201_120000 --no-calibration
+```
 
 ### 설정 파일 (config_GBDT.yaml)
 ```yaml
-# 모델 선택
 model:
-  name: "xgboost"  # "xgboost" 또는 "catboost"
+  name: "xgboost"  # "xgboost" or "catboost"
 
-# Training 설정
 training:
-  val_ratio: 0.1
-  force_reprocess: false
+  use_mixup: false
+  mixup_alpha: 0.3
+  mixup_ratio: 0.5
 
-# XGBoost 설정
 xgboost:
   n_estimators: 200
   learning_rate: 0.1
   max_depth: 8
-  subsample: 0.8
-  colsample_bytree: 0.8
   tree_method: "gpu_hist"
-  gpu_id: 0
-  early_stopping_rounds: 20
 
-# CatBoost 설정
 catboost:
   n_estimators: 200
   learning_rate: 0.1
   max_depth: 8
   task_type: "GPU"
-  devices: "0"
-  early_stopping_rounds: 20
 ```
 
-### 출력 파일
-```
-result_GBDT_{model}/
-├── workflow/             # NVTabular 전처리 파이프라인
-├── *.parquet            # 전처리된 데이터
-└── submission.csv       # 제출 파일
-```
+## 🧠 DNN 모델
 
-## 🧠 DNN 모델 사용법
+### 학습
 
-### 멀티 GPU 훈련
+**기본 실행:**
 ```bash
-# 4개 GPU 사용 (DDP)
-python train_and_predict_dnn_ddp.py
-
-# 특정 GPU 선택
-CUDA_VISIBLE_DEVICES=0,1 python train_and_predict_dnn_ddp.py
+python train_dnn_ddp.py
 ```
 
-### 주요 설정 (코드 내부)
-```python
-CFG = {
-    'BATCH_SIZE': 1024,
-    'EPOCHS': 5,
-    'LEARNING_RATE': 1e-3,
-    'NUM_DEVICES': 4,    # GPU 개수
-    'STRATEGY': 'ddp',   # 분산 전략
-    'VAL_RATIO': 0.1,
-    'USE_MIXUP': True,   # MixUp 활성화
-    'MIXUP_ALPHA': 0.3,  # Beta 분포 파라미터
-    'MIXUP_PROB': 0.5    # 배치별 MixUp 적용 확률
-}
+**HPO 결과 활용 (권장):**
+```bash
+# 1. HPO 실행
+python hpo_dnn.py --train-path data/train_t.parquet --n-trials 50
+
+# 2. 최적 파라미터로 학습
+python train_dnn_ddp.py --config config_dnn_optimized_best_params.yaml --epochs 20
 ```
 
-### MixUp for DNN
-DNN 모델은 온라인 MixUp을 사용하여 각 배치마다 확률적으로 데이터 증강을 수행합니다.
+**커맨드 라인 옵션:**
+```bash
+# 설정 override
+python train_dnn_ddp.py --epochs 10 --learning-rate 0.0005 --no-mixup
+```
 
-**DNN MixUp 특징:**
-- **온라인 증강**: 학습 중 각 배치마다 실시간으로 MixUp 적용
-- **확률적 적용**: `MIXUP_PROB`로 배치별 적용 확률 조절
-- **수치형 피처 전용**: 현재 구현은 연속형 피처에만 MixUp 적용 (범주형/시퀀스는 원본 유지)
-- **메모리 효율적**: 원본 데이터 크기 유지하면서 증강 효과
+### 예측
+```bash
+# 자동 calibration (기본값 - 권장)
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000
 
-**권장 설정:**
-- `MIXUP_ALPHA`: 0.2~0.4 (0.3 권장)
-- `MIXUP_PROB`: 0.3~0.7 (0.5 권장)
+# Calibration 비활성화
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000 --no-calibration
+```
+
+### 커맨드 라인 옵션
+
+**Training:**
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--config` | YAML config 파일 (HPO 결과) | None |
+| `--epochs` | 학습 epochs | 5 |
+| `--batch-size` | Batch size | 1024 |
+| `--learning-rate` | Learning rate | 0.001 |
+| `--no-mixup` | MixUp 비활성화 | False |
+
+**Prediction:**
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--model-dir` | 모델 디렉토리 | 필수 |
+| `--test-path` | 테스트 데이터 경로 | data/test.parquet |
+| `--no-calibration` | Calibration 비활성화 | False |
+| `--batch-size` | 배치 사이즈 | 2048 |
+
+### Config 파일 형식
+
+**HPO 결과 (자동 생성):**
+```yaml
+best_score: 0.875432
+best_params:
+  learning_rate: 0.001234
+  weight_decay: 0.000056
+  emb_dim: 32
+  lstm_hidden: 64
+  n_layers: 3
+  mixup_alpha: 0.3
+```
+
+**수동 작성:**
+```yaml
+LEARNING_RATE: 0.002
+WEIGHT_DECAY: 0.0001
+USE_MIXUP: true
+MODEL:
+  EMB_DIM: 64
+  LSTM_HIDDEN: 128
+  HIDDEN_UNITS: [1024, 512, 256]
+  CROSS_LAYERS: 3
+```
+
+**Config 우선순위:** CLI args > YAML config > Default config
 
 ## 🎯 하이퍼파라미터 최적화 (HPO)
 
-Optuna를 사용하여 모델의 하이퍼파라미터를 자동으로 최적화합니다.
+Optuna를 사용하여 자동으로 최적 하이퍼파라미터를 찾습니다.
 
-### XGBoost HPO
-```bash
-# 기본 실행
-python hpo_xgboost.py --data-path data/train.parquet --n-trials 100 --val-ratio 0.2
-
-# 빠른 테스트 (데이터 서브샘플링)
-python hpo_xgboost.py --data-path data/train.parquet --n-trials 30 --subsample-ratio 0.1
-
-# 시간 제한 설정
-python hpo_xgboost.py --data-path data/train.parquet --n-trials 200 --timeout 28800  # 8시간
-```
-
-### CatBoost HPO
-```bash
-# GPU 사용
-python hpo_catboost.py --data-path data/train.parquet --n-trials 100 --task-type GPU
-
-# CPU 사용 (colsample_bylevel 포함)
-python hpo_catboost.py --data-path data/train.parquet --n-trials 100 --task-type CPU
-
-# NVTabular 처리된 데이터 사용
-python hpo_catboost.py --data-path result_GBDT_catboost --n-trials 100
-```
-
-### DNN HPO
-```bash
-# 기본 실행
-python hpo_dnn.py --train-path data/train.parquet --n-trials 50 --val-ratio 0.2
-
-# 빠른 테스트 (서브샘플링)
-python hpo_dnn.py --train-path data/train.parquet --n-trials 20 --subsample-ratio 0.1 --max-epochs 5
-
-# 전체 최적화
-python hpo_dnn.py --train-path data/train.parquet --n-trials 100 --max-epochs 15 --timeout 14400
-```
-
-### HPO 명령줄 인자
-
-| 인자 | 설명 | 기본값 |
-|------|------|--------|
-| `--data-path` / `--train-path` | 데이터 경로 | 필수 |
-| `--n-trials` | Optuna 시도 횟수 | 100 (GBDT), 50 (DNN) |
-| `--val-ratio` | Validation 비율 | 0.2 |
-| `--subsample-ratio` | 사용할 데이터 비율 | 1.0 |
-| `--timeout` | 최대 실행 시간 (초) | None |
-| `--max-epochs` | Trial당 최대 에포크 (DNN) | 10 |
-| `--patience` | Early stopping patience (DNN) | 3 |
-
-### 최적화되는 하이퍼파라미터
-
-**XGBoost:**
-- `n_estimators`, `max_depth`, `learning_rate`, `subsample`, `colsample_bytree`
-- `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`, `max_bin`
-
-**CatBoost:**
-- `iterations`, `depth`, `learning_rate`, `subsample`, `l2_leaf_reg`
-- `bootstrap_type`, `bagging_temperature`, `colsample_bylevel` (CPU), `border_count`
-
-**DNN:**
-- `batch_size`, `learning_rate`, `weight_decay`
-- `emb_dim`, `lstm_hidden`, `cross_layers`, `n_layers`, `hidden_size`, `dropout`
-
-### 최적화 후 사용
-
-최적화가 완료되면 `config_*_optimized.yaml` 파일이 생성됩니다.
+### 사용법
 
 ```bash
-# GBDT 최적화 파라미터로 전체 학습
-python train_and_predict_GBDT.py --config config_GBDT_optimized.yaml
+# XGBoost
+python hpo_xgboost.py --data-path data/train_fold1.parquet --n-trials 1000
 
-# DNN은 생성된 config 파일을 코드에 반영하여 사용
+# CatBoost
+python hpo_catboost.py --data-path data/train_fold1.parquet --n-trials 1000 --task-type GPU
+
+# DNN
+python hpo_dnn.py --train-path data/train_fold1.parquet --n-trials 100
 ```
 
-### 예상 실행 시간
+### HPO 후 사용
+
+```bash
+# GBDT
+python train_gbdt.py --config config_GBDT_optimized.yaml
+
+# DNN
+python train_dnn_ddp.py --config config_dnn_optimized_best_params.yaml --epochs 30
+```
+
+### 최적화되는 파라미터
 
 **XGBoost/CatBoost:**
-- 빠른 테스트 (10% 데이터, 30 trials): 5-15분
-- 중간 최적화 (30% 데이터, 100 trials): 30분-1시간
-- 최종 최적화 (100% 데이터, 200 trials): 2-4시간
+- `n_estimators`, `learning_rate`, `max_depth`, `subsample`, `colsample_bytree`
+- `min_child_weight`, `gamma`, `reg_alpha`, `reg_lambda`
 
 **DNN:**
-- 빠른 테스트 (10% 데이터, 20 trials, 5 epochs): 10-20분
-- 중간 최적화 (30% 데이터, 50 trials, 10 epochs): 1-2시간
-- 최종 최적화 (100% 데이터, 100 trials, 15 epochs): 3-6시간
+- `learning_rate`, `weight_decay`, `batch_size`
+- `emb_dim`, `lstm_hidden`, `cross_layers`, `hidden_units`, `dropout`
+- `mixup_alpha`, `mixup_prob`
 
 ## 📊 데이터 준비
 
-### 필수 데이터
-```
-data/
-├── train.parquet    # 훈련 데이터 (10.7M rows)
-└── test.parquet     # 테스트 데이터
-```
-
-### 데이터 분할 (Optional)
+### 데이터 분할 (필수)
 ```bash
-# 10-fold 데이터 분할
 python dataset_split.py
 ```
 
-이 스크립트는 `clicked` 값에 따라 데이터를 분할합니다:
-- `clicked=1`: 모든 fold에 포함 (positive 샘플 보존)
-- `clicked=0`: 10개 fold로 분할
+**생성 파일:**
+- `data/train_t.parquet`: 훈련 (80%) - 모델 학습
+- `data/train_v.parquet`: 검증 (10%) - Early stopping
+- `data/train_c.parquet`: 캘리브레이션 (10%) - Prediction 시 calibration
 
-## 🎯 피처 설명
+**특징:**
+- Stratified split (클래스 비율 유지)
+- 데이터 누수 방지
+- 재현성 보장
 
-### 범주형 피처 (5개)
-- `gender`, `age_group`, `inventory_id`, `day_of_week`, `hour`
+## 🎯 Calibration (자동 확률 보정)
 
-### 연속형 피처 (110개)
-- `feat_a_*` (18개)
-- `feat_b_*` (6개)
-- `feat_c_*` (8개)
-- `feat_d_*` (6개)
-- `feat_e_*` (10개)
-- `history_a_*` (7개)
-- `history_b_*` (30개)
-- `l_feat_*` (25개, `l_feat_20`, `l_feat_23` 제외)
+**Prediction 시점에 자동으로 최적 calibration 방법 선택**
 
-### 시퀀스 피처 (DNN만 사용)
-- `seq`: 가변 길이 시퀀스 데이터
+### 작동 방식
 
-### 제외 피처
-- `l_feat_20`, `l_feat_23` (상수 값)
+1. **train_c 분할**: Balanced set (50:50) + Test set (imbalanced)
+2. **4가지 방법 테스트**: none, isotonic, sigmoid, temperature
+3. **자동 선택**: Test set에서 가장 높은 score를 가진 방법 사용
+4. **안전장치**: 성능 떨어지면 원본 사용 (none 선택)
 
-## 📈 평가 메트릭
+```
+train_c → Balanced fit (50:50) + Imbalanced test (~1% pos)
+           ↓
+  Test 4 methods: none, isotonic, sigmoid, temperature
+           ↓
+  Select best → Apply to test.parquet
+```
 
-대회 메트릭: `Score = 0.5 * AP + 0.5 * (1 / (1 + WLL))`
+### 사용 예시
 
-- **AP (Average Precision)**: 50% 가중치
-- **WLL (Weighted LogLoss)**: 50% 가중치 (클래스 50:50 균형)
+```bash
+# 자동 calibration (기본값 - 권장)
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000
+
+# Calibration 비활성화
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000 --no-calibration
+```
+
+**출력 예시:**
+```
+🎯 Finding Best Calibration Method
+...
+   [NONE]       Score: 0.850000
+   [ISOTONIC]   Score: 0.865000
+   [SIGMOID]    Score: 0.868000
+   [TEMPERATURE] Score: 0.872000 ← Optimal temperature: 1.2345
+
+🏆 Best Method: TEMPERATURE (Improvement: +0.022000)
+```
+
+**장점:**
+- ✅ 자동 최적화
+- ✅ 학습 시간 단축
+- ✅ 성능 떨어지면 원본 사용
+- ✅ Balanced fitting으로 robust
+
+## 💡 MixUp 데이터 증강
+
+### GBDT MixUp
+- 오프라인 증강: 학습 전 MixUp 샘플 생성
+- Config에서 설정: `use_mixup: true`, `mixup_ratio: 0.5`
+
+### DNN MixUp
+- 온라인 증강: 배치마다 실시간 MixUp
+- 확률적 적용: `MIXUP_PROB`로 배치별 적용 확률 조절
+- 수치형 피처만 적용 (범주형/시퀀스는 원본 유지)
+
+**권장 설정:**
+- `MIXUP_ALPHA`: 0.3
+- `MIXUP_PROB` (DNN): 0.5
+- `mixup_ratio` (GBDT): 0.5
+
+## 📈 피처 및 평가
+
+### 피처
+- **범주형** (5개): gender, age_group, inventory_id, day_of_week, hour
+- **연속형** (110개): feat_a_*, feat_b_*, feat_c_*, history_*, l_feat_*
+- **시퀀스** (DNN only): seq
+- **제외**: l_feat_20, l_feat_23 (상수)
+
+### 평가 메트릭
+```
+Score = 0.5 * AP + 0.5 * (1 / (1 + WLL))
+```
+- **AP**: Average Precision
+- **WLL**: Weighted LogLoss (50:50 class balance)
 
 ## 💾 메모리 및 성능
 
-### GBDT 모델
-- **GPU 메모리**: 10-14GB (RTX 3090 기준)
-- **System RAM**: 32GB+ 권장
-- **처리 속도**: 전체 데이터 단일 학습 약 10-30분
+### GBDT
+- GPU 메모리: 10-14GB
+- System RAM: 32GB+
+- 학습 시간: 10-30분
 
-### DNN 모델
-- **GPU 메모리**: 24GB per GPU (4 GPUs 권장)
-- **System RAM**: 64GB+ 권장
-- **처리 속도**: 5 epochs 약 30분-1시간
-
-## 🔍 데이터 분석
-
-`analysis/` 디렉토리에 데이터 분석 스크립트가 포함되어 있습니다. 자세한 내용은 `analysis/README.md`를 참조하세요.
-
-**주요 분석 도구:**
-- `chunk_eda.py`: 대용량 데이터 EDA (청크 단위 처리)
-- `feature_quality_analysis.py`: 피처 품질 분석
-- `compute_normalization_stats.py`: 표준화 통계 계산
-- Missing pattern 분석 스크립트
+### DNN
+- GPU 메모리: 24GB per GPU (4 GPUs 권장)
+- System RAM: 64GB+
+- 학습 시간: 5 epochs → 30분-1시간
 
 ## 📝 주요 업데이트
 
-- **2025-10-08**: MixUp 데이터 증강 기법 추가 (GBDT/DNN 모두 지원)
-- **2025-10-08**: 통합 환경 (environment.yaml) 구성 - RAPIDS + PyTorch 단일 환경
-- **2025-01-08**: Cross-validation → Train/Val split 변경 (validation ratio 0.1)
-- **2025-01-08**: 코드 정리 및 구조화, 공통 함수 통합
-- **2024-12-31**: HPO (하이퍼파라미터 최적화) 스크립트 추가
-- **2024-12-30**: GBDT 모델 (XGBoost/CatBoost) 추가
-- **2024-12-29**: DNN 멀티 GPU (DDP) 지원 추가
+- **2025-10-08**: **Calibration 자동 선택 시스템**
+  - Prediction 시 4가지 방법 자동 테스트 및 best 선택
+  - Training 시간 단축 (calibration 제거)
+  - 성능 떨어지면 원본 사용
+  
+- **2025-10-08**: **DNN HPO 결과 활용**
+  - YAML config로 HPO 결과 저장/로드
+  - CLI args > YAML > Default 우선순위
+  
+- **2025-10-08**: **학습/예측 분리**
+  - Training: 모델만 저장
+  - Prediction: 자동 calibration + submission 생성
+  
+- **2025-10-08**: **데이터 분할 변경**
+  - `dataset_split.py`로 train_t/train_v/train_c 생성
+  - 재현성 향상 및 데이터 누수 방지
+  
+- **2025-10-08**: **MixUp 증강 추가**
+  - GBDT: 오프라인 증강
+  - DNN: 온라인 확률적 증강
+
+## 🎯 고급 사용법
+
+### HPO 워크플로우
+
+```bash
+# 1. 빠른 HPO (작은 데이터)
+python hpo_dnn.py \
+    --train-path data/train_t.parquet \
+    --n-trials 50 \
+    --subsample-ratio 0.3 \
+    --max-epochs 5
+
+# 2. 전체 데이터로 학습
+python train_dnn_ddp.py \
+    --config config_dnn_optimized_best_params.yaml \
+    --epochs 30
+
+# 3. 예측 (자동 calibration)
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000
+```
+
+### MixUp 설정
+
+**GBDT (config_GBDT.yaml):**
+```yaml
+training:
+  use_mixup: true
+  mixup_alpha: 0.3
+  mixup_ratio: 0.5  # 50% 샘플 추가
+```
+
+**DNN (config or CLI):**
+```bash
+python train_dnn_ddp.py --config hpo_results.yaml
+# Config에 mixup_alpha, mixup_prob 포함
+```
+
+### Calibration 상세
+
+**자동 선택 프로세스:**
+1. train_c를 balanced fit set + imbalanced test set으로 분할
+2. 4가지 방법(none, isotonic, sigmoid, temperature) 모두 fitting
+3. Test set에서 평가하여 best 선택
+4. Best method로 test.parquet 예측
+
+**비활성화:**
+```bash
+python pred_dnn_ddp.py --model-dir result_dnn_ddp/20231201_120000 --no-calibration
+```
+
+## 🔍 데이터 분석
+
+`analysis/` 디렉토리에 EDA 및 피처 분석 도구가 포함되어 있습니다. 자세한 내용은 `analysis/README.md`를 참조하세요.
+
+**주요 도구:**
+- `chunk_eda.py`: 대용량 데이터 EDA
+- `feature_quality_analysis.py`: 피처 품질 분석
+- `compute_normalization_stats.py`: 표준화 통계 계산
 
 ## 🐛 문제 해결
 
-### torch 모듈을 찾을 수 없는 경우
+### 환경 문제
 ```bash
-# 통합 환경 재설치
+# 환경 재설치
 conda env remove -n toss-env
 conda env create -f environment.yaml
-conda activate toss-env
 ```
 
 ### GPU 메모리 부족
 ```bash
-# GBDT: 데이터 서브샘플링 또는 작은 batch_size 사용
-python train_and_predict_GBDT.py --val-ratio 0.1  # validation 비율 줄이기
+# GBDT: 자동 메모리 관리 (코드 내부)
+python train_gbdt.py
 
-# DNN: GPU 개수 조정 또는 batch size 감소
-CUDA_VISIBLE_DEVICES=0,1 python train_and_predict_dnn_ddp.py
+# DNN: GPU 개수 또는 batch size 조정
+CUDA_VISIBLE_DEVICES=0,1 python train_dnn_ddp.py
+python train_dnn_ddp.py --batch-size 512
 ```
 
-### cuDF string limit 에러
-Raw parquet 파일 사용 시 자동으로 `seq` 컬럼이 제외됩니다.
+### cuDF string limit
+자동으로 `seq` 컬럼이 제외됩니다 (NVTabular 처리 시).
 
 ## 🤝 참고사항
 
-- 모든 스크립트는 단일 통합 환경 (`toss-env`)에서 실행됩니다
-- GBDT와 DNN 모델 모두 동일한 conda 환경 사용
-- GPU는 필수이며, CUDA 11.8+ 환경 권장
-- 데이터 분석 도구는 `analysis/README.md` 참조
+- **통합 환경**: GBDT와 DNN 모두 `toss-env` 사용
+- **GPU 필수**: CUDA 11.8+ 권장
+- **데이터 분할 필수**: `dataset_split.py` 먼저 실행
+- **Calibration**: Prediction 시 자동 수행 (--no-calibration으로 비활성화 가능)
+- **HPO**: 작은 데이터로 빠르게 실행 후 전체 데이터로 학습 권장
+
+## 📚 상세 문서
+
+- **데이터 분석**: `analysis/README.md`
+- **환경 설정**: `environment.yaml` 주석 참조
+- **설정 예시**: `config_GBDT.yaml`, `config_dnn_example.yaml`

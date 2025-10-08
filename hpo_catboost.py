@@ -47,6 +47,9 @@ import nvtabular as nvt
 from nvtabular import ops
 from merlin.io import Dataset
 
+# MixUp
+from mixup import apply_mixup_to_dataset
+
 print(f"✅ CatBoost version: {cb.__version__}")
 print(f"✅ Optuna version: {optuna.__version__}")
 
@@ -263,7 +266,7 @@ def load_processed_data(data_path, subsample_ratio=1.0):
     
     return X_np, y
 
-def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20, task_type='GPU'):
+def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_rounds=20, task_type='GPU', use_mixup=True, scale_pos_weight=1.0):
     """Optuna objective function for CatBoost"""
     
     # Hyperparameter search space
@@ -290,19 +293,45 @@ def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20, t
     params['border_count'] = trial.suggest_int('border_count', 32, 255)
     
     # Class imbalance handling
-    pos_ratio = y_train.mean()
-    scale_pos_weight = (1 - pos_ratio) / pos_ratio
     params['class_weights'] = [1.0, scale_pos_weight]
+    
+    # MixUp hyperparameters (if enabled)
+    if use_mixup:
+        mixup_alpha = trial.suggest_float('mixup_alpha', 0.1, 0.5, step=0.1)
+        mixup_ratio = trial.suggest_float('mixup_ratio', 0.3, 0.7, step=0.1)
+        
+        # Apply MixUp
+        class_weight = (1.0, scale_pos_weight)
+        X_train, y_train, sample_weight = apply_mixup_to_dataset(
+            X_train_orig, y_train_orig,
+            class_weight=class_weight,
+            alpha=mixup_alpha,
+            ratio=mixup_ratio,
+            rng=np.random.default_rng(42)
+        )
+    else:
+        X_train = X_train_orig
+        y_train = y_train_orig
+        sample_weight = None
     
     # Train model
     model = cb.CatBoostClassifier(**params)
     
-    model.fit(
-        X_train, y_train,
-        eval_set=(X_val, y_val),
-        early_stopping_rounds=early_stopping_rounds,
-        verbose=False
-    )
+    if sample_weight is not None:
+        model.fit(
+            X_train, y_train,
+            sample_weight=sample_weight,
+            eval_set=(X_val, y_val),
+            early_stopping_rounds=early_stopping_rounds,
+            verbose=False
+        )
+    else:
+        model.fit(
+            X_train, y_train,
+            eval_set=(X_val, y_val),
+            early_stopping_rounds=early_stopping_rounds,
+            verbose=False
+        )
     
     y_pred = model.predict_proba(X_val)[:, 1]
     score, _, _ = calculate_competition_score(y_val, y_pred)
@@ -315,11 +344,12 @@ def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20, t
     return score
 
 def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0, 
-                     early_stopping_rounds=20, timeout=None, task_type='GPU'):
+                     early_stopping_rounds=20, timeout=None, task_type='GPU', use_mixup=True):
     """Run Optuna optimization"""
     print("\n" + "="*70)
     print("🔍 CatBoost Hyperparameter Optimization with Optuna")
     print("="*70)
+    print(f"   MixUp enabled: {use_mixup}")
     
     # Load data
     X_np, y = load_processed_data(data_path, subsample_ratio)
@@ -330,6 +360,10 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0
         X_np, y, test_size=val_ratio, random_state=42, stratify=y
     )
     
+    # Calculate scale_pos_weight
+    pos_ratio = y_train.mean()
+    scale_pos_weight = (1 - pos_ratio) / pos_ratio
+    
     print(f"\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
     print(f"   Task type: {task_type}")
@@ -339,6 +373,7 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0
     print(f"   Features: {X_np.shape[1]}")
     print(f"   Train positive ratio: {y_train.mean():.4f}")
     print(f"   Val positive ratio: {y_val.mean():.4f}")
+    print(f"   Scale pos weight: {scale_pos_weight:.2f}")
     if timeout:
         print(f"   Timeout: {timeout}s")
     else:
@@ -356,7 +391,7 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0
     
     # Optimize
     study.optimize(
-        lambda trial: objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds, task_type),
+        lambda trial: objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds, task_type, use_mixup, scale_pos_weight),
         n_trials=n_trials,
         timeout=timeout,
         show_progress_bar=True
@@ -445,6 +480,10 @@ def main():
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--task-type', type=str, default='GPU', choices=['GPU', 'CPU'],
                         help='Task type for CatBoost (default: GPU)')
+    parser.add_argument('--use-mixup', action='store_true', default=True,
+                        help='Enable MixUp data augmentation (default: True)')
+    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
+                        help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_GBDT_optimized.yaml',
                         help='Output config file path (default: config_GBDT_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',
@@ -459,6 +498,7 @@ def main():
     print(f"   Subsample ratio: {args.subsample_ratio}")
     print(f"   Early stopping: {args.early_stopping_rounds}")
     print(f"   Task type: {args.task_type}")
+    print(f"   Use MixUp: {args.use_mixup}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
     else:
@@ -472,7 +512,8 @@ def main():
         subsample_ratio=args.subsample_ratio,
         early_stopping_rounds=args.early_stopping_rounds,
         timeout=args.timeout,
-        task_type=args.task_type
+        task_type=args.task_type,
+        use_mixup=args.use_mixup
     )
     
     # Save results

@@ -1,27 +1,36 @@
 data:
-  train_path: /data1/seunghoon/train.parquet
+  train_t_path: data/train_t.parquet
+  train_v_path: data/train_v.parquet
+  train_c_path: data/train_c.parquet
   temp_dir: tmp
-cv:
-  n_folds: 5
+training:
   force_reprocess: false
+  use_mixup: false
+  mixup_alpha: 0.3
+  mixup_ratio: 0.5
 model:
   name: xgboost
 xgboost:
-  n_estimators: 200
-  learning_rate: 0.1
-  max_depth: 8
-  subsample: 0.8
-  colsample_bytree: 0.8
+  n_estimators: 143
+  learning_rate: 0.01297841702787308
+  max_depth: 12
+  subsample: 1.0
+  colsample_bytree: 0.7498282850767498
   tree_method: gpu_hist
   gpu_id: 0
   verbosity: 0
   early_stopping_rounds: 20
   random_state: 42
+  min_child_weight: 10
+  gamma: 0.536704198035387
+  reg_alpha: 1.9733927369476356e-07
+  reg_lambda: 0.00094106985004141
+  max_bin: 191
 catboost:
-  n_estimators: 383
-  learning_rate: 0.010725209743171997
-  max_depth: 10
-  subsample: 0.6061695553391381
+  n_estimators: 200
+  learning_rate: 0.1
+  max_depth: 8
+  subsample: 0.8
   colsample_bylevel: 0.8
   task_type: GPU
   devices: '0'
@@ -29,9 +38,7 @@ catboost:
   early_stopping_rounds: 20
   thread_count: -1
   random_state: 42
-  bootstrap_type: MVS
-  l2_leaf_reg: 8.491983767203795
-  border_count: 149
+  bootstrap_type: Bernoulli
 presets:
   xgboost_fast:
     model:

@@ -31,6 +31,8 @@ dependencies:
   - pyyaml
   - tqdm
   - pip>=23
+
+  - optuna
   
   # Install PyTorch and related packages via pip for better GPU compatibility
   - pip:

@@ -31,6 +31,9 @@ import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
+# MixUp
+from mixup import mixup_batch_torch
+
 print(f"✅ PyTorch version: {torch.__version__}")
 print(f"✅ Optuna version: {optuna.__version__}")
 print(f"✅ CUDA available: {torch.cuda.is_available()}")
@@ -232,7 +235,7 @@ def worker_init_fn(worker_id):
         os.sched_setaffinity(0, range(os.cpu_count()))
         
 def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats, 
-              cat_encoders, target_col, device, max_epochs=10, patience=3):
+              cat_encoders, target_col, device, max_epochs=10, patience=3, use_mixup=True):
     """Optuna objective function for DNN"""
     
     print(f"\n{'='*70}")
@@ -249,10 +252,16 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     lstm_hidden = trial.suggest_categorical('lstm_hidden', [32, 64])
     cross_layers = trial.suggest_int('cross_layers', 1, 3)
     
+    # MixUp hyperparameters (if enabled)
+    if use_mixup:
+        mixup_alpha = trial.suggest_float('mixup_alpha', 0.1, 0.5, step=0.1)
+        mixup_prob = trial.suggest_float('mixup_prob', 0.3, 0.7, step=0.1)
+    else:
+        mixup_alpha = 0.0
+        mixup_prob = 0.0
+    
     # MLP architecture
     n_layers = trial.suggest_int('n_layers', 2, 4)
-    # hidden_units = []
-    # dropout_rates = []
     
     # Generate hidden units and dropout rates based on n_layers
     hidden_units = [128*2**(n_layers-(j+1)) for j in range(n_layers)]
@@ -269,6 +278,9 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     print(f"   n_layers: {n_layers}")
     print(f"   hidden_units: {hidden_units}")
     print(f"   dropout_rates: {dropout_rates}")
+    if use_mixup:
+        print(f"   mixup_alpha: {mixup_alpha:.3f}")
+        print(f"   mixup_prob: {mixup_prob:.3f}")
     
     # Create datasets
     train_dataset = ClickDataset(train_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
@@ -320,8 +332,19 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
             ys = ys.to(device)
             
             optimizer.zero_grad()
-            logits = model(num_x, cat_x, seqs, lens)
-            loss = criterion(logits, ys)
+            
+            # Apply MixUp with probability if enabled
+            if use_mixup and np.random.rand() < mixup_prob:
+                # MixUp for numerical features
+                num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=device)
+                
+                # For categorical and sequence features, we keep them from the first sample
+                logits = model(num_x_mixed, cat_x, seqs, lens)
+                loss = criterion(logits, ys_mixed)
+            else:
+                logits = model(num_x, cat_x, seqs, lens)
+                loss = criterion(logits, ys)
+            
             loss.backward()
             optimizer.step()
             
@@ -397,11 +420,12 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     return best_score
 
 def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0,
-                     max_epochs=10, patience=3, timeout=None, seed=42):
+                     max_epochs=10, patience=3, timeout=None, seed=42, use_mixup=True):
     """Run Optuna optimization"""
     print("\n" + "="*70)
     print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna")
     print("="*70)
+    print(f"   MixUp enabled: {use_mixup}")
     
     # Set seed
     seed_everything(seed)
@@ -474,7 +498,7 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     study.optimize(
         lambda trial: objective(
             trial, train_split, val_split, num_cols, cat_cols, seq_col, 
-            norm_stats, cat_encoders, target_col, device, max_epochs, patience
+            norm_stats, cat_encoders, target_col, device, max_epochs, patience, use_mixup
         ),
         n_trials=n_trials,
         timeout=timeout,
@@ -573,6 +597,10 @@ def main():
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
+    parser.add_argument('--use-mixup', action='store_true', default=True,
+                        help='Enable MixUp data augmentation (default: True)')
+    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
+                        help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_widedeep_optimized.yaml',
                         help='Output config file path (default: config_widedeep_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_widedeep.yaml',
@@ -602,7 +630,8 @@ def main():
         max_epochs=args.max_epochs,
         patience=args.patience,
         timeout=args.timeout,
-        seed=args.seed
+        seed=args.seed,
+        use_mixup=args.use_mixup
     )
     
     # Save results

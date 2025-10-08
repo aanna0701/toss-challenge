@@ -44,11 +44,12 @@ from optuna.samplers import TPESampler
 # Import common functions
 from utils import calculate_competition_score, clear_gpu_memory
 from data_loader import load_processed_data_gbdt
+from mixup import apply_mixup_to_dataset
 
 print(f"✅ XGBoost version: {xgb.__version__}")
 print(f"✅ Optuna version: {optuna.__version__}")
 
-def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20):
+def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_rounds=20, use_mixup=True, scale_pos_weight=1.0):
     """Optuna objective function for XGBoost"""
     
     # Hyperparameter search space
@@ -60,26 +61,44 @@ def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20):
         'predictor': 'gpu_predictor',
         
         # Hyperparameters to optimize
-        'max_depth': trial.suggest_int('max_depth', 4, 12),
+        'max_depth': trial.suggest_int('max_depth', 12, 20),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+        'min_child_weight': trial.suggest_int('min_child_weight', 10, 50),
         'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
-        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
-        'max_bin': trial.suggest_int('max_bin', 64, 256),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1e-5, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1e-5, log=True),
+        'max_bin': trial.suggest_int('max_bin', 128, 256),
         'seed': 42,
+        'scale_pos_weight': scale_pos_weight,
     }
     
     n_estimators = trial.suggest_int('n_estimators', 100, 500)
     
-    # Class imbalance handling
-    pos_ratio = y_train.mean()
-    scale_pos_weight = (1 - pos_ratio) / pos_ratio
-    params['scale_pos_weight'] = scale_pos_weight
+    # MixUp hyperparameters (if enabled)
+    if use_mixup:
+        mixup_alpha = trial.suggest_float('mixup_alpha', 0, 0.5, step=0.1)
+        mixup_ratio = 0.6
+        
+        # Apply MixUp
+        class_weight = (1.0, scale_pos_weight)
+        X_train, y_train, sample_weight = apply_mixup_to_dataset(
+            X_train_orig, y_train_orig,
+            class_weight=class_weight,
+            alpha=mixup_alpha,
+            ratio=mixup_ratio,
+            rng=np.random.default_rng(42)
+        )
+    else:
+        X_train = X_train_orig
+        y_train = y_train_orig
+        sample_weight = None
     
     # Train model
-    dtrain = xgb.DMatrix(X_train, label=y_train)
+    if sample_weight is not None:
+        dtrain = xgb.DMatrix(X_train, label=y_train, weight=sample_weight)
+    else:
+        dtrain = xgb.DMatrix(X_train, label=y_train)
     dval = xgb.DMatrix(X_val, label=y_val)
     
     model = xgb.train(
@@ -101,11 +120,12 @@ def objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds=20):
     return score
 
 def run_optimization(data_path, n_trials=100, val_ratio=0.2, 
-                     early_stopping_rounds=20, timeout=None):
+                     early_stopping_rounds=20, timeout=None, use_mixup=True):
     """Run Optuna optimization"""
     print("\n" + "="*70)
     print("🔍 XGBoost Hyperparameter Optimization with Optuna")
     print("="*70)
+    print(f"   MixUp enabled: {use_mixup}")
     
     # Load data
     X_np, y = load_processed_data_gbdt(data_path)
@@ -116,6 +136,10 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2,
         X_np, y, test_size=val_ratio, random_state=42, stratify=y
     )
     
+    # Calculate scale_pos_weight
+    pos_ratio = y_train.mean()
+    scale_pos_weight = (1 - pos_ratio) / pos_ratio
+    
     print(f"\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
     print(f"   Total samples: {len(X_np):,}")
@@ -124,6 +148,7 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2,
     print(f"   Features: {X_np.shape[1]}")
     print(f"   Train positive ratio: {y_train.mean():.4f}")
     print(f"   Val positive ratio: {y_val.mean():.4f}")
+    print(f"   Scale pos weight: {scale_pos_weight:.2f}")
     if timeout:
         print(f"   Timeout: {timeout}s")
     else:
@@ -141,7 +166,7 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2,
     
     # Optimize
     study.optimize(
-        lambda trial: objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds),
+        lambda trial: objective(trial, X_train, y_train, X_val, y_val, early_stopping_rounds, use_mixup, scale_pos_weight),
         n_trials=n_trials,
         timeout=timeout,
         show_progress_bar=True
@@ -227,6 +252,10 @@ def main():
                         help='Early stopping rounds (default: 20)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
+    parser.add_argument('--use-mixup', action='store_true', default=True,
+                        help='Enable MixUp data augmentation (default: True)')
+    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
+                        help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_GBDT_optimized.yaml',
                         help='Output config file path (default: config_GBDT_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',
@@ -239,6 +268,7 @@ def main():
     print(f"   Trials: {args.n_trials}")
     print(f"   Validation ratio: {args.val_ratio}")
     print(f"   Early stopping: {args.early_stopping_rounds}")
+    print(f"   Use MixUp: {args.use_mixup}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
     else:
@@ -250,7 +280,8 @@ def main():
         n_trials=args.n_trials,
         val_ratio=args.val_ratio,
         early_stopping_rounds=args.early_stopping_rounds,
-        timeout=args.timeout
+        timeout=args.timeout,
+        use_mixup=args.use_mixup
     )
     
     # Save results

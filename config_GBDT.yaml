@@ -3,16 +3,18 @@
 
 # Data paths
 data:
-  train_path: "/data1/seunghoon/train.parquet"
+  train_t_path: "data/train_t.parquet"  # Training data (80%)
+  train_v_path: "data/train_v.parquet"  # Validation data (10%)
+  train_c_path: "data/train_c.parquet"  # Calibration data (10%)
   temp_dir: "tmp"
 
 # Training settings
 training:
-  val_ratio: 0.1
   force_reprocess: false
   use_mixup: false     # Enable MixUp data augmentation
   mixup_alpha: 0.3     # Beta distribution parameter (0.3 recommended)
   mixup_ratio: 0.5     # Ratio of MixUp samples to add (0.5 = add 50% more data)
+  # Note: Calibration is now performed during prediction (pred_gbdt.py automatically finds best method)
 
 # Model selection (xgboost or catboost)
 model:
