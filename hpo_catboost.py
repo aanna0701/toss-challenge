@@ -278,10 +278,10 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_ro
         'thread_count': -1,
         
         # Hyperparameters to optimize
-        'iterations': trial.suggest_int('iterations', 100, 500),
+        'iterations': trial.suggest_int('iterations', 100, 1000),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'depth': trial.suggest_int('depth', 4, 10),
-        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0),
+        'depth': trial.suggest_int('depth', 4, 50),
+        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 50.0),
         'bootstrap_type': trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli', 'MVS']),
     }
     
@@ -297,7 +297,7 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_ro
     
     # MixUp hyperparameters (if enabled)
     if use_mixup:
-        mixup_alpha = trial.suggest_float('mixup_alpha', 0.1, 0.5, step=0.1)
+        mixup_alpha = trial.suggest_float('mixup_alpha', 0.01, 0.3)
         mixup_ratio = trial.suggest_float('mixup_ratio', 0.3, 0.7, step=0.1)
         
         # Apply MixUp

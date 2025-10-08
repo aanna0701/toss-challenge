@@ -232,10 +232,10 @@ def prepare_features(train_df, cat_cols):
     return train_df, encoders
 
 def worker_init_fn(worker_id):
-        os.sched_setaffinity(0, range(os.cpu_count()))
-        
+    os.sched_setaffinity(0, range(os.cpu_count()))
+
 def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats, 
-              cat_encoders, target_col, device, max_epochs=10, patience=3, use_mixup=True):
+              cat_encoders, target_col, device, use_mixup=True):
     """Optuna objective function for DNN"""
     
     print(f"\n{'='*70}")
@@ -312,115 +312,92 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
-    # Training loop with early stopping
-    best_score = 0.0
-    patience_counter = 0
+    # Training (single epoch)
+    model.train()
+    train_loss = 0
+    train_samples = 0
     
-    for epoch in range(max_epochs):
-        # Training
-        model.train()
-        train_loss = 0
-        train_samples = 0
+    # Use tqdm for training progress
+    train_pbar = tqdm(train_loader, desc=f"Trial {trial.number} Training", leave=False)
+    for num_x, cat_x, seqs, lens, ys in train_pbar:
+        num_x = num_x.to(device)
+        cat_x = cat_x.to(device)
+        seqs = seqs.to(device)
+        lens = lens.to(device)
+        ys = ys.to(device)
         
-        # Use tqdm for training progress
-        train_pbar = tqdm(train_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{max_epochs}", leave=False)
-        for num_x, cat_x, seqs, lens, ys in train_pbar:
+        optimizer.zero_grad()
+        
+        # Apply MixUp with probability if enabled
+        if use_mixup and np.random.rand() < mixup_prob:
+            # MixUp for numerical features
+            num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=device)
+            
+            # For categorical and sequence features, we keep them from the first sample
+            logits = model(num_x_mixed, cat_x, seqs, lens)
+            loss = criterion(logits, ys_mixed)
+        else:
+            logits = model(num_x, cat_x, seqs, lens)
+            loss = criterion(logits, ys)
+        
+        loss.backward()
+        optimizer.step()
+        
+        batch_loss = loss.item()
+        train_loss += batch_loss * ys.size(0)
+        train_samples += ys.size(0)
+        
+        # Update progress bar
+        train_pbar.set_postfix({'loss': f'{batch_loss:.4f}'})
+    
+    avg_train_loss = train_loss / train_samples
+    
+    # Validation
+    model.eval()
+    val_loss = 0
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        val_pbar = tqdm(val_loader, desc=f"Trial {trial.number} Validation", leave=False)
+        for num_x, cat_x, seqs, lens, ys in val_pbar:
             num_x = num_x.to(device)
             cat_x = cat_x.to(device)
             seqs = seqs.to(device)
             lens = lens.to(device)
             ys = ys.to(device)
             
-            optimizer.zero_grad()
+            logits = model(num_x, cat_x, seqs, lens)
+            loss = criterion(logits, ys)
+            val_loss += loss.item() * ys.size(0)
             
-            # Apply MixUp with probability if enabled
-            if use_mixup and np.random.rand() < mixup_prob:
-                # MixUp for numerical features
-                num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=device)
-                
-                # For categorical and sequence features, we keep them from the first sample
-                logits = model(num_x_mixed, cat_x, seqs, lens)
-                loss = criterion(logits, ys_mixed)
-            else:
-                logits = model(num_x, cat_x, seqs, lens)
-                loss = criterion(logits, ys)
-            
-            loss.backward()
-            optimizer.step()
-            
-            batch_loss = loss.item()
-            train_loss += batch_loss * ys.size(0)
-            train_samples += ys.size(0)
-            
-            # Update progress bar
-            train_pbar.set_postfix({'loss': f'{batch_loss:.4f}'})
-        
-        avg_train_loss = train_loss / train_samples
-        
-        # Validation
-        model.eval()
-        val_loss = 0
-        all_preds = []
-        all_targets = []
-        
-        with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc=f"Trial {trial.number} Validation", leave=False)
-            for num_x, cat_x, seqs, lens, ys in val_pbar:
-                num_x = num_x.to(device)
-                cat_x = cat_x.to(device)
-                seqs = seqs.to(device)
-                lens = lens.to(device)
-                ys = ys.to(device)
-                
-                logits = model(num_x, cat_x, seqs, lens)
-                loss = criterion(logits, ys)
-                val_loss += loss.item() * ys.size(0)
-                
-                preds = torch.sigmoid(logits).cpu().numpy()
-                all_preds.extend(preds)
-                all_targets.extend(ys.cpu().numpy())
-        
-        val_loss = val_loss / len(all_targets)
-        all_preds = np.array(all_preds)
-        all_targets = np.array(all_targets)
-        
-        # Calculate competition score
-        score, ap, wll = calculate_competition_score(all_targets, all_preds)
-        
-        # Print epoch results
-        print(f"Trial {trial.number} Epoch {epoch+1}/{max_epochs} - "
-              f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-              f"Val Score: {score:.6f} (AP: {ap:.6f}, WLL: {wll:.6f})")
-        
-        # Report to Optuna
-        trial.report(score, epoch)
-        
-        # Handle pruning
-        if trial.should_prune():
-            print(f"Trial {trial.number} pruned at epoch {epoch+1}")
-            raise optuna.TrialPruned()
-        
-        # Early stopping
-        if score > best_score:
-            best_score = score
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Trial {trial.number} early stopped at epoch {epoch+1} (best score: {best_score:.6f})")
-                break
+            preds = torch.sigmoid(logits).cpu().numpy()
+            all_preds.extend(preds)
+            all_targets.extend(ys.cpu().numpy())
     
-    # Print final trial result
-    print(f"✅ Trial {trial.number} finished - Best Score: {best_score:.6f}\n")
+    val_loss = val_loss / len(all_targets)
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    
+    # Calculate competition score
+    score, ap, wll = calculate_competition_score(all_targets, all_preds)
+    
+    # Print results
+    print(f"Trial {trial.number} - "
+          f"Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}, "
+          f"Val Score: {score:.6f} (AP: {ap:.6f}, WLL: {wll:.6f})")
+    
+    # Report to Optuna
+    trial.report(score, 0)
     
     # Cleanup
     del model, optimizer, train_loader, val_loader, train_dataset, val_dataset
     clear_gpu_memory()
     
-    return best_score
+    return score
 
 def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0,
-                     max_epochs=10, patience=3, timeout=None, seed=42, use_mixup=True):
+                     timeout=None, seed=42, use_mixup=True):
     """Run Optuna optimization"""
     print("\n" + "="*70)
     print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna")
@@ -472,8 +449,6 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     
     print("\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
-    print(f"   Max epochs per trial: {max_epochs}")
-    print(f"   Early stopping patience: {patience}")
     print(f"   Total samples: {len(train_df):,}")
     print(f"   Train samples: {len(train_split):,}")
     print(f"   Val samples: {len(val_split):,}")
@@ -498,7 +473,7 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     study.optimize(
         lambda trial: objective(
             trial, train_split, val_split, num_cols, cat_cols, seq_col, 
-            norm_stats, cat_encoders, target_col, device, max_epochs, patience, use_mixup
+            norm_stats, cat_encoders, target_col, device, use_mixup
         ),
         n_trials=n_trials,
         timeout=timeout,
@@ -589,10 +564,6 @@ def main():
                         help='Validation split ratio (default: 0.2)')
     parser.add_argument('--subsample-ratio', type=float, default=1.0,
                         help='Ratio of data to use (default: 1.0 = use all)')
-    parser.add_argument('--max-epochs', type=int, default=10,
-                        help='Maximum epochs per trial (default: 10)')
-    parser.add_argument('--patience', type=int, default=3,
-                        help='Early stopping patience (default: 3)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--seed', type=int, default=42,
@@ -613,8 +584,6 @@ def main():
     print(f"   Trials: {args.n_trials}")
     print(f"   Validation ratio: {args.val_ratio}")
     print(f"   Subsample ratio: {args.subsample_ratio}")
-    print(f"   Max epochs: {args.max_epochs}")
-    print(f"   Patience: {args.patience}")
     print(f"   Seed: {args.seed}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
@@ -627,8 +596,6 @@ def main():
         n_trials=args.n_trials,
         val_ratio=args.val_ratio,
         subsample_ratio=args.subsample_ratio,
-        max_epochs=args.max_epochs,
-        patience=args.patience,
         timeout=args.timeout,
         seed=args.seed,
         use_mixup=args.use_mixup

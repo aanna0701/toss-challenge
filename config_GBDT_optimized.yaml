@@ -11,21 +11,21 @@ training:
 model:
   name: xgboost
 xgboost:
-  n_estimators: 143
-  learning_rate: 0.01297841702787308
-  max_depth: 12
+  n_estimators: 385
+  learning_rate: 0.10029079391424421
+  max_depth: 45
   subsample: 1.0
-  colsample_bytree: 0.7498282850767498
+  colsample_bytree: 0.9157331305265549
   tree_method: gpu_hist
   gpu_id: 0
   verbosity: 0
   early_stopping_rounds: 20
   random_state: 42
-  min_child_weight: 10
-  gamma: 0.536704198035387
-  reg_alpha: 1.9733927369476356e-07
-  reg_lambda: 0.00094106985004141
-  max_bin: 191
+  min_child_weight: 51
+  gamma: 0.11558134904908313
+  reg_alpha: 1.2698439619840122e-06
+  reg_lambda: 2.44197179298831e-08
+  max_bin: 228
 catboost:
   n_estimators: 200
   learning_rate: 0.1

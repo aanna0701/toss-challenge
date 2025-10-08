@@ -61,10 +61,10 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, early_stopping_ro
         'predictor': 'gpu_predictor',
         
         # Hyperparameters to optimize
-        'max_depth': trial.suggest_int('max_depth', 12, 20),
+        'max_depth': trial.suggest_int('max_depth', 20, 50),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 10, 50),
+        'min_child_weight': trial.suggest_int('min_child_weight', 50, 100),
         'gamma': trial.suggest_float('gamma', 0.0, 1.0),
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1e-5, log=True),
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1e-5, log=True),

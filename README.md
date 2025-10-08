@@ -117,7 +117,7 @@ python train_dnn_ddp.py
 
 **HPO 결과 활용 (권장):**
 ```bash
-# 1. HPO 실행
+# 1. HPO 실행 (1 epoch per trial)
 python hpo_dnn.py --train-path data/train_t.parquet --n-trials 50
 
 # 2. 최적 파라미터로 학습
@@ -196,12 +196,12 @@ Optuna를 사용하여 자동으로 최적 하이퍼파라미터를 찾습니다
 
 ```bash
 # XGBoost
-python hpo_xgboost.py --data-path data/train_fold1.parquet --n-trials 1000
+python hpo_xgboost.py --data-path data/train_fold1.parquet --n-trials 100
 
 # CatBoost
-python hpo_catboost.py --data-path data/train_fold1.parquet --n-trials 1000 --task-type GPU
+python hpo_catboost.py --data-path data/train_fold1.parquet --n-trials 100 --task-type GPU
 
-# DNN
+# DNN (1 epoch per trial)
 python hpo_dnn.py --train-path data/train_fold1.parquet --n-trials 100
 ```
 
@@ -361,12 +361,11 @@ Score = 0.5 * AP + 0.5 * (1 / (1 + WLL))
 ### HPO 워크플로우
 
 ```bash
-# 1. 빠른 HPO (작은 데이터)
+# 1. 빠른 HPO (작은 데이터, 1 epoch per trial)
 python hpo_dnn.py \
     --train-path data/train_t.parquet \
     --n-trials 50 \
-    --subsample-ratio 0.3 \
-    --max-epochs 5
+    --subsample-ratio 0.3
 
 # 2. 전체 데이터로 학습
 python train_dnn_ddp.py \
