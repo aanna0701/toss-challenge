@@ -256,8 +256,8 @@ def main():
                         help='Enable MixUp data augmentation (default: True)')
     parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
                         help='Disable MixUp data augmentation')
-    parser.add_argument('--output-config', type=str, default='config_GBDT_optimized.yaml',
-                        help='Output config file path (default: config_GBDT_optimized.yaml)')
+    parser.add_argument('--output-config', type=str, default='config_xgboost_optimized.yaml',
+                        help='Output config file path (default: config_xgboost_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',
                         help='Original config file path (default: config_GBDT.yaml)')
     
