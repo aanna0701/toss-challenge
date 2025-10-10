@@ -10,10 +10,8 @@ print("✅ Environment configured")
 # Core imports
 import gc
 import json
-import pickle
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
@@ -36,11 +34,6 @@ except (ImportError, RuntimeError) as e:
 # Set GPU device
 cp.cuda.Device(0).use()
 
-# NVTabular
-import nvtabular as nvt
-from nvtabular import ops
-from merlin.io import Dataset
-
 # ML libraries
 import xgboost as xgb
 import catboost as cb
@@ -50,6 +43,7 @@ import argparse
 
 # Import common functions
 from utils import clear_gpu_memory, print_memory, calculate_competition_score
+from data_loader import load_processed_data_gbdt
 
 # ============================================================================
 # Calibration Classes
@@ -91,16 +85,16 @@ def parse_args():
     
     parser.add_argument('--model-dir', type=str, required=True,
                         help='Directory containing trained model (e.g., result_GBDT_xgboost/20231201_120000)')
-    parser.add_argument('--test-path', type=str, default='data/test.parquet',
-                        help='Path to test data')
+    parser.add_argument('--test-path', type=str, default='data/proc_test',
+                        help='Path to preprocessed test data (default: data/proc_test)')
+    parser.add_argument('--cal-path', type=str, default='data/proc_train_c',
+                        help='Path to preprocessed calibration data (default: data/proc_train_c)')
     parser.add_argument('--output-path', type=str, default=None,
                         help='Path to save submission file (default: {model_dir}/submission.csv)')
     parser.add_argument('--use-calibration', action='store_true', default=True,
                         help='Use calibration model for predictions (default: True)')
     parser.add_argument('--no-calibration', dest='use_calibration', action='store_false',
                         help='Disable calibration')
-    parser.add_argument('--temp-dir', type=str, default='tmp',
-                        help='Temporary directory for intermediate files')
     
     return parser.parse_args()
 
@@ -113,12 +107,11 @@ def load_model_and_metadata(model_dir):
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"Metadata not found: {metadata_path}")
     
-    with open(metadata_path, 'r') as f:
+    with open(metadata_path, 'r', encoding='utf-8') as f:
         metadata = json.load(f)
     
     print(f"   Model: {metadata['model_name']}")
     print(f"   Validation Score: {metadata['val_score']:.6f}")
-    print(f"   Calibration method: {metadata['calibration_method']}")
     
     # Find model file
     model_name = metadata['model_name']
@@ -142,79 +135,32 @@ def load_model_and_metadata(model_dir):
     
     return model, metadata
 
-def load_and_preprocess_test(test_path, workflow_dir, temp_dir):
-    """Load and preprocess test data"""
-    print(f"\n📦 Loading and preprocessing test data from {test_path}...")
+def load_test_data(test_path):
+    """Load preprocessed test data"""
+    print(f"\n📦 Loading preprocessed test data from {test_path}...")
     
-    # Create temp directory if needed
-    os.makedirs(temp_dir, exist_ok=True)
+    # Load test data using the same loader as HPO
+    X_test, _ = load_processed_data_gbdt(test_path)
     
-    # Load workflow
-    workflow_path = os.path.join(workflow_dir, 'workflow')
-    if not os.path.exists(workflow_path):
-        raise FileNotFoundError(f"Workflow not found: {workflow_path}")
-    
-    workflow = nvt.Workflow.load(workflow_path)
-    print(f"   ✅ Workflow loaded from {workflow_path}")
-    
-    # Create temp test file without excluded columns
-    temp_test_path = os.path.join(temp_dir, 'test_no_seq.parquet')
-    if not os.path.exists(temp_test_path):
-        print("   Creating temp test file without excluded columns...")
-        pf = pq.ParquetFile(test_path)
-        cols = [c for c in pf.schema.names if c not in ['seq', 'l_feat_20', 'l_feat_23', '']]
-        print(f"   Total columns: {len(pf.schema.names)}, Using: {len(cols)} (excluded 'seq', 'l_feat_20', 'l_feat_23')")
-        
-        df_test = pd.read_parquet(test_path, columns=cols)
-        df_test.to_parquet(temp_test_path, index=False)
-        del df_test
-        gc.collect()
-        print("   ✅ Temp test file created")
+    # Look for original parquet file to get IDs
+    original_test_path = test_path.replace('proc_test', 'test.parquet')
+    if os.path.exists(original_test_path):
+        test_df_original = pd.read_parquet(original_test_path, columns=['ID'])
+        test_ids = test_df_original['ID'].values
+        del test_df_original
     else:
-        print(f"   ✅ Using existing temp test file: {temp_test_path}")
+        # If original file not found, generate sequential IDs
+        print(f"   ⚠️ Original test file not found at {original_test_path}, generating sequential IDs")
+        test_ids = np.arange(len(X_test))
     
-    # Apply workflow to test data
-    print("   Applying workflow to test data...")
-    test_dataset = Dataset(temp_test_path, engine='parquet', part_size='64MB')
-    
-    # Recreate workflow components without 'clicked'
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +
-        [f'feat_b_{i}' for i in range(1, 7)] +
-        [f'feat_c_{i}' for i in range(1, 9)] +
-        [f'feat_d_{i}' for i in range(1, 7)] +
-        [f'feat_e_{i}' for i in range(1, 11)] +
-        [f'history_a_{i}' for i in range(1, 8)] +
-        [f'history_b_{i}' for i in range(1, 31)] +
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]
-    )
-    
-    cat_features = true_categorical >> ops.Categorify(freq_threshold=0, max_size=50000)
-    cont_features = all_continuous >> ops.FillMissing(fill_val=0)
-    
-    # Create test workflow without 'clicked'
-    test_workflow = nvt.Workflow(cat_features + cont_features)
-    test_workflow.fit(test_dataset)
-    gdf_test = test_workflow.transform(test_dataset).to_ddf().compute()
-    
-    # Get test IDs from original file
-    test_df_original = pd.read_parquet(test_path, columns=['ID'])
-    test_ids = test_df_original['ID'].values
-    del test_df_original
-    
-    # Convert to float32
-    feature_cols = [col for col in gdf_test.columns if col != 'ID']
-    X_test = gdf_test[feature_cols].astype('float32', copy=False)
-    X_test_np = X_test.to_numpy()
-    del X_test, gdf_test
     gc.collect()
     
-    print(f"   ✅ Test data loaded and preprocessed: {X_test_np.shape}")
+    print(f"   ✅ Test data loaded: {X_test.shape}")
+    print(f"   ✅ Test IDs: {len(test_ids):,}")
     
-    return X_test_np, test_ids, temp_test_path
+    return X_test, test_ids
 
-def find_best_calibration(model, workflow_dir, model_name, temp_dir, test_ratio=0.5):
+def find_best_calibration(model, cal_path, model_name, test_ratio=0.5):
     """
     Find best calibration method by comparing all methods on calibration test set
     
@@ -227,10 +173,10 @@ def find_best_calibration(model, workflow_dir, model_name, temp_dir, test_ratio=
     print("🎯 Finding Best Calibration Method")
     print("="*70)
     
-    # Load and preprocess train_c
-    print(f"\n📦 Loading and preprocessing calibration data (train_c)...")
-    cal_path = "data/train_c.parquet"
-    X_cal, y_cal, temp_cal_path = load_and_preprocess_calibration(cal_path, workflow_dir, temp_dir)
+    # Load preprocessed train_c
+    print(f"\n📦 Loading preprocessed calibration data from {cal_path}...")
+    X_cal, y_cal = load_processed_data_gbdt(cal_path)
+    print(f"   ✅ Loaded {X_cal.shape[0]:,} samples with {X_cal.shape[1]} features")
     
     # Get raw predictions on train_c
     print("   Collecting predictions on train_c...")
@@ -339,84 +285,9 @@ def find_best_calibration(model, workflow_dir, model_name, temp_dir, test_ratio=
         improvement = best_score - results['none']['score']
         print(f"   Improvement over raw: {improvement:+.6f}")
     
-    # Cleanup temp files
-    if os.path.exists(temp_cal_path):
-        os.remove(temp_cal_path)
-    
     print("="*70)
     
     return best_method, calibrators[best_method], results
-
-def load_and_preprocess_calibration(data_path, workflow_dir, temp_dir):
-    """Load and preprocess calibration/validation data using the same workflow as test"""
-    import shutil
-    
-    # Create temp directory if needed
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Load workflow
-    workflow_path = os.path.join(workflow_dir, 'workflow')
-    if not os.path.exists(workflow_path):
-        raise FileNotFoundError(f"Workflow not found: {workflow_path}")
-    
-    workflow = nvt.Workflow.load(workflow_path)
-    
-    # Create temp file without excluded columns
-    temp_path = os.path.join(temp_dir, f'{os.path.basename(data_path).replace(".parquet", "_no_seq.parquet")}')
-    
-    if not os.path.exists(temp_path):
-        pf = pq.ParquetFile(data_path)
-        cols = [c for c in pf.schema.names if c not in ['seq', 'l_feat_20', 'l_feat_23', '']]
-        
-        df = pd.read_parquet(data_path, columns=cols)
-        df.to_parquet(temp_path, index=False)
-        del df
-        gc.collect()
-    
-    # Apply workflow
-    dataset = Dataset(temp_path, engine='parquet', part_size='64MB')
-    
-    # Recreate workflow components
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +
-        [f'feat_b_{i}' for i in range(1, 7)] +
-        [f'feat_c_{i}' for i in range(1, 9)] +
-        [f'feat_d_{i}' for i in range(1, 7)] +
-        [f'feat_e_{i}' for i in range(1, 11)] +
-        [f'history_a_{i}' for i in range(1, 8)] +
-        [f'history_b_{i}' for i in range(1, 31)] +
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]
-    )
-    
-    cat_features = true_categorical >> ops.Categorify(freq_threshold=0, max_size=50000)
-    cont_features = all_continuous >> ops.FillMissing(fill_val=0)
-    
-    # Add 'clicked' if exists
-    from nvtabular import ColumnSelector
-    if 'clicked' in dataset.to_ddf().columns:
-        cal_workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
-    else:
-        cal_workflow = nvt.Workflow(cat_features + cont_features)
-    
-    cal_workflow.fit(dataset)
-    gdf = cal_workflow.transform(dataset).to_ddf().compute()
-    
-    # Extract features and target
-    if 'clicked' in gdf.columns:
-        y = gdf['clicked'].to_numpy()
-        X = gdf.drop('clicked', axis=1)
-    else:
-        y = None
-        X = gdf
-    
-    feature_cols = [col for col in X.columns if col != 'ID']
-    X = X[feature_cols].astype('float32', copy=False)
-    X_np = X.to_numpy()
-    del X, gdf
-    gc.collect()
-    
-    return X_np, y, temp_path
 
 def predict_and_save(model, best_method, best_calibrator, X_test, test_ids, model_name, output_path):
     """Generate predictions and save submission file"""
@@ -475,6 +346,7 @@ def main():
     print("="*70)
     print(f"   Model directory: {args.model_dir}")
     print(f"   Test data: {args.test_path}")
+    print(f"   Calibration data: {args.cal_path}")
     print(f"   Use calibration: {args.use_calibration}")
     
     # Verify paths
@@ -484,6 +356,9 @@ def main():
     if not os.path.exists(args.test_path):
         raise FileNotFoundError(f"Test data not found: {args.test_path}")
     
+    if args.use_calibration and not os.path.exists(args.cal_path):
+        raise FileNotFoundError(f"Calibration data not found: {args.cal_path}")
+    
     # Set output path
     if args.output_path is None:
         args.output_path = os.path.join(args.model_dir, 'submission.csv')
@@ -492,31 +367,19 @@ def main():
     model, metadata = load_model_and_metadata(args.model_dir)
     model_name = metadata['model_name']
     
-    # Determine workflow directory (parent of model_dir)
-    workflow_dir = os.path.dirname(args.model_dir)
-    if not os.path.exists(os.path.join(workflow_dir, 'workflow')):
-        # If workflow not found in parent, try the model_dir itself
-        workflow_dir = args.model_dir
-        if not os.path.exists(os.path.join(workflow_dir, 'workflow')):
-            raise FileNotFoundError(f"Workflow not found in {workflow_dir}")
-    
     # Find best calibration method if enabled
     best_method = 'none'
     best_calibrator = None
     
     if args.use_calibration:
-        best_method, best_calibrator, calibration_results = find_best_calibration(
-            model, workflow_dir, model_name, args.temp_dir
+        best_method, best_calibrator, _ = find_best_calibration(
+            model, args.cal_path, model_name
         )
     else:
         print("\n⚠️  Calibration disabled by user (--no-calibration)")
     
-    # Load and preprocess test data
-    X_test, test_ids, temp_test_path = load_and_preprocess_test(
-        args.test_path, 
-        workflow_dir, 
-        args.temp_dir
-    )
+    # Load preprocessed test data
+    X_test, test_ids = load_test_data(args.test_path)
     
     # Predict and save
     predict_and_save(
@@ -528,16 +391,6 @@ def main():
         model_name,
         args.output_path
     )
-    
-    # Cleanup
-    print("\n🧹 Cleaning up...")
-    if os.path.exists(temp_test_path):
-        os.remove(temp_test_path)
-        print(f"   ✅ Removed {temp_test_path}")
-    
-    if os.path.exists(args.temp_dir) and not os.listdir(args.temp_dir):
-        os.rmdir(args.temp_dir)
-        print(f"   ✅ Removed empty directory {args.temp_dir}")
     
     clear_gpu_memory()
     print_memory()

@@ -481,7 +481,7 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
     config['LEARNING_RATE'] = best_params['learning_rate']
     config['WEIGHT_DECAY'] = best_params['weight_decay']
     
-    # Model architecture parameters
+    # Model architecture parameters (always present)
     config['MODEL']['WIDEDEEP']['EMB_DIM'] = best_params['emb_dim']
     config['MODEL']['WIDEDEEP']['LSTM_HIDDEN'] = best_params['lstm_hidden']
     

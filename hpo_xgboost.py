@@ -264,15 +264,15 @@ def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
     
     # Load train_t (training data, drop seq for GBDT)
     print(f"\n📦 Loading training data from {train_t_path}...")
-    X_train, y_train = load_processed_data_gbdt(train_t_path, drop_seq=True)
+    X_train, y_train = load_processed_data_gbdt(train_t_path)
     
-    # Load train_v (validation data, drop seq for GBDT) 
+    # Load train_v (validation data, seq automatically excluded)
     print(f"\n📦 Loading validation data from {train_v_path}...")
-    X_val, y_val = load_processed_data_gbdt(train_v_path, drop_seq=True)
+    X_val, y_val = load_processed_data_gbdt(train_v_path)
     
-    # Load train_c (calibration data, drop seq for GBDT)
+    # Load train_c (calibration data, seq automatically excluded)
     print(f"\n📦 Loading calibration data from {train_c_path}...")
-    X_cal, y_cal = load_processed_data_gbdt(train_c_path, drop_seq=True)
+    X_cal, y_cal = load_processed_data_gbdt(train_c_path)
     
     # Calculate scale_pos_weight
     pos_ratio = y_train.mean()
@@ -349,11 +349,15 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
     
     # Update XGBoost parameters
     best_params = study.best_params
+    
+    # Core parameters (always present)
     config['xgboost']['n_estimators'] = int(best_params['n_estimators'])
     config['xgboost']['learning_rate'] = best_params['learning_rate']
     config['xgboost']['max_depth'] = int(best_params['max_depth'])
-    config['xgboost']['subsample'] = 1.0
     config['xgboost']['colsample_bytree'] = best_params['colsample_bytree']
+    
+    # Fixed parameters
+    config['xgboost']['subsample'] = 1.0
     
     # Add additional parameters
     if 'min_child_weight' in best_params:
@@ -399,10 +403,8 @@ def main():
                         help='Early stopping rounds (default: 20)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
-    parser.add_argument('--use-mixup', action='store_true', default=True,
-                        help='Enable MixUp data augmentation (default: True)')
-    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
-                        help='Disable MixUp data augmentation')
+    parser.add_argument('--use-mixup', action='store_true', default=False,
+                        help='Enable MixUp data augmentation (default: False)')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
                         help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',

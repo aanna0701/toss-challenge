@@ -33,34 +33,45 @@ xgboost:
   # use_mixup: true
   # mixup_alpha: 0.6
   # mixup_ratio: 0.3
-  n_estimators: 84
+  n_estimators: 293
   early_stopping_rounds: 20
-  max_depth: 5
-  learning_rate: 0.13066341322939076
+  max_depth: 6
+  learning_rate: 0.037304761898752176
   subsample: 1.0
-  colsample_bytree: 0.5108367911454451
+  colsample_bytree: 0.6351227643858766
   scale_pos_weight: null
   gpu_id: 0
   verbosity: 0
   seed: 42
   tree_method: gpu_hist
-  use_mixup: true
-  mixup_alpha: 0.1
-  mixup_ratio: 0.2
-  min_child_weight: 18
-  gamma: 1.2673867800210414
-  reg_alpha: 0.2763580304884297
-  reg_lambda: 2.6758321672210155
-  max_bin: 164
+  use_mixup: false
+  min_child_weight: 7
+  gamma: 1.241565369269177
+  reg_alpha: 1.925105128912058
+  reg_lambda: 1.4570210990841745
+  max_bin: 221
   calibration_method: sigmoid
 
 # CatBoost configuration
 catboost:
+  # # Model parameters
+  # iterations: 200
+  # learning_rate: 0.1
+  # depth: 8
+  # subsample: 1
+  # colsample_bylevel: 0.8
+  # task_type: "GPU"
+  # devices: "0"
+  # verbose: false
+  # early_stopping_rounds: 20
+  # thread_count: -1
+  # random_seed: 42
+  # bootstrap_type: "Bernoulli"  # Required when using subsample
   # Model parameters
-  iterations: 200
-  learning_rate: 0.1
-  depth: 8
-  subsample: 1
+  iterations: 402
+  learning_rate: 0.08013119587199334
+  depth: 7
+  subsample: 0.9061364491214401
   colsample_bylevel: 0.8
   task_type: "GPU"
   devices: "0"

@@ -1,9 +1,0 @@
-best_params:
-  bootstrap_type: MVS
-  border_count: 149.0
-  depth: 10.0
-  iterations: 383.0
-  l2_leaf_reg: 8.491983767203795
-  learning_rate: 0.010725209743171997
-  subsample: 0.6061695553391381
-best_score: 0.48496548956265406

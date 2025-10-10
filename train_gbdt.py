@@ -290,17 +290,17 @@ def run_train():
     # Import the same function HPO uses
     from data_loader import load_processed_data_gbdt
     
-    # Load TRAIN data (pre-processed, drop seq for GBDT)
+    # Load TRAIN data (pre-processed, seq column automatically excluded)
     print("\n📦 Loading train data...")
-    X_train, y_train = load_processed_data_gbdt(CONFIG.train_t_path, drop_seq=True)
+    X_train, y_train = load_processed_data_gbdt(CONFIG.train_t_path)
     print(f"   Train shape: {X_train.shape}")
     print(f"   Train positive ratio: {y_train.mean():.6f}")
     
     clear_gpu_memory()
 
-    # Load VAL data (pre-processed, drop seq for GBDT)
+    # Load VAL data (pre-processed, seq column automatically excluded)
     print("\n📦 Loading val data...")
-    X_val, y_val = load_processed_data_gbdt(CONFIG.train_v_path, drop_seq=True)
+    X_val, y_val = load_processed_data_gbdt(CONFIG.train_v_path)
     print(f"   Val shape: {X_val.shape}")
     print(f"   Val positive ratio: {y_val.mean():.6f}")
     

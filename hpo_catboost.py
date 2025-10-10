@@ -146,15 +146,15 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
         'iterations': trial.suggest_int('iterations', 100, 500),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
         # GPU 메모리 최적화: depth를 낮게 유지 (메모리에 가장 큰 영향)
-        'depth': trial.suggest_int('depth', 4, 6),
+        'depth': trial.suggest_int('depth', 4, 16),
         # Bootstrap type
-        'bootstrap_type': 'Bernoulli',
-        'subsample': trial.suggest_float('subsample', 0.5, 1.0),  # 트리당 샘플링
+        'bootstrap_type': trial.suggest_categorical('bootstrap_type', ['Bernoulli', 'Bayesian', 'MVS']),
+        'subsample': trial.suggest_float('subsample', 0.1, 1.0),  # 트리당 샘플링
         
         # 🔧 GPU 메모리 최적화 파라미터 (전체 데이터용)
         'allow_writing_files': False,
-        'border_count': 64,  # feature binning 줄임 (기본 254 → 64로 메모리 절약)
-        'max_ctr_complexity': 2,  # CTR 복잡도 제한
+        'border_count': trial.suggest_int('border_count', 32, 128),  # feature binning 줄임 (기본 254 → 64로 메모리 절약)
+        'max_ctr_complexity': trial.suggest_int('max_ctr_complexity', 1, 8),  # CTR 복잡도 제한
         
         # GPU 설정
         'gpu_ram_part': 0.95,  # 전체 데이터이므로 GPU RAM 충분히 사용
@@ -290,15 +290,15 @@ def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
     
     # Load train_t (training data, drop seq for GBDT)
     print(f"\n📦 Loading training data from {train_t_path}...")
-    X_train, y_train = load_processed_data_gbdt(train_t_path, drop_seq=True)
+    X_train, y_train = load_processed_data_gbdt(train_t_path)
     
-    # Load train_v (validation data, drop seq for GBDT)
+    # Load train_v (validation data, seq automatically excluded)
     print(f"\n📦 Loading validation data from {train_v_path}...")
-    X_val, y_val = load_processed_data_gbdt(train_v_path, drop_seq=True)
+    X_val, y_val = load_processed_data_gbdt(train_v_path)
     
-    # Load train_c (calibration data, drop seq for GBDT)
+    # Load train_c (calibration data, seq automatically excluded)
     print(f"\n📦 Loading calibration data from {train_c_path}...")
-    X_cal, y_cal = load_processed_data_gbdt(train_c_path, drop_seq=True)
+    X_cal, y_cal = load_processed_data_gbdt(train_c_path)
     
     # scale_pos_weight
     pos_ratio = y_train.mean()
@@ -375,12 +375,26 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
     
     best_params = study.best_params
     
+    # Core parameters (always present in trials)
     config['catboost']['n_estimators'] = best_params['iterations']
     config['catboost']['learning_rate'] = best_params['learning_rate']
     config['catboost']['max_depth'] = best_params['depth']
     config['catboost']['bootstrap_type'] = best_params['bootstrap_type']
+    
+    # Add optional parameters if present
     if 'colsample_bylevel' in best_params:
         config['catboost']['colsample_bylevel'] = best_params['colsample_bylevel']
+    
+    # Add MixUp parameters if present
+    if 'mixup_alpha' in best_params:
+        config['catboost']['mixup_alpha'] = best_params['mixup_alpha']
+    if 'mixup_ratio' in best_params:
+        config['catboost']['mixup_ratio'] = best_params['mixup_ratio']
+    
+    # Add calibration method
+    if 'calibration_method' in best_params:
+        config['catboost']['calibration_method'] = best_params['calibration_method']
+        print(f"   Best calibration method: {best_params['calibration_method']}")
     
     # 기본값
     config['catboost']['task_type'] = 'GPU'
@@ -413,8 +427,6 @@ def main():
                         help='Task type for CatBoost (default: GPU)')
     parser.add_argument('--use-mixup', action='store_true', default=False,
                         help='Enable MixUp data augmentation (default: False, GPU 메모리 절약)')
-    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
-                        help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
                         help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',

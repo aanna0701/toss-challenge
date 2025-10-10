@@ -63,8 +63,8 @@ data/proc_train_hpo/  - seq 결측치 처리 ('0.0')
 data/proc_test/       - seq 포함
 ↓
 ├─ GBDT (train_gbdt.py, hpo_xgboost.py)
-│  └─ load_processed_data_gbdt(path, drop_seq=True)
-│     → seq 제거, categorical encoded, continuous standardized
+│  └─ load_processed_data_gbdt(path)
+│     → seq 자동 제거됨, categorical encoded, continuous standardized
 │
 └─ DNN (train_dnn_ddp.py, hpo_dnn.py)
    └─ load_processed_dnn_data(path)

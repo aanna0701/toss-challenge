@@ -18,26 +18,26 @@ from utils import clear_gpu_memory
 # GBDT 모델용 데이터 로더 (Pre-processed data from dataset_split_and_preprocess.py)
 # ============================================================================
 
-def load_processed_data_gbdt(data_path, drop_seq=True):
+def load_processed_data_gbdt(data_path):
     """
     Load pre-processed data from dataset_split_and_preprocess.py
     
+    GBDT models don't use the 'seq' column, so it's excluded during loading.
+    
     Args:
         data_path: Path to processed directory (e.g., 'data/proc_train_t')
-        drop_seq: If True, drop 'seq' column (for GBDT models)
     
     Returns:
-        X_np: numpy array of features (float32)
+        X_np: numpy array of features (float32) - WITHOUT 'seq' column
         y: numpy array of labels
     
     Note:
         - 반드시 dataset_split_and_preprocess.py를 먼저 실행하여 전처리 데이터 생성 필요
         - Categorical: 이미 Categorify로 인코딩됨 (0-based indices)
         - Continuous: 이미 Standardization 적용됨 (mean=0, std=1)
+        - 'seq' column is ALWAYS excluded (GBDT doesn't use sequential features)
     """
-    print(f"\n📦 Loading data from {data_path}...")
-    if drop_seq:
-        print("   🗑️  seq column will be dropped (GBDT mode)")
+    print(f"\n📦 Loading data from {data_path} (GBDT mode - seq column will be excluded)...")
     start_load = time.time()
     
     # Pre-processed directory만 지원
@@ -48,24 +48,57 @@ def load_processed_data_gbdt(data_path, drop_seq=True):
             "   예: python dataset_split_and_preprocess.py"
         )
     
-    # Pre-processed directory - load directly (FAST!)
+    # Pre-processed directory - Use Pandas to avoid CUDF String column size limit
+    # CUDF has a 2GB limit for string columns, but 'seq' column exceeds this
+    # GBDT doesn't use 'seq' column anyway, so we exclude it from the start
     try:
-        dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
-        print("   Converting to GPU DataFrame...")
-        gdf = dataset.to_ddf().compute()
-        print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
+        import glob
+        import pandas as pd
+        
+        # Find all parquet files in the directory
+        parquet_files = glob.glob(os.path.join(data_path, "*.parquet"))
+        if not parquet_files:
+            raise ValueError(f"No parquet files found in {data_path}")
+        
+        print(f"   Found {len(parquet_files)} parquet file(s)")
+        print("   Reading with Pandas (excluding 'seq' column)...")
+        
+        # Read first file to get column names (excluding 'seq')
+        sample_df = pd.read_parquet(parquet_files[0], engine='pyarrow')
+        cols_to_read = [col for col in sample_df.columns if col != 'seq']
+        del sample_df
+        
+        print(f"   Columns to read: {len(cols_to_read)} (seq excluded)")
+        
+        # Read all files with selected columns
+        dfs = []
+        for pf in parquet_files:
+            dfs.append(pd.read_parquet(pf, columns=cols_to_read, engine='pyarrow'))
+        df = pd.concat(dfs, ignore_index=True)
+        
+        # Convert to cudf for GPU acceleration in subsequent operations
+        import cudf
+        gdf = cudf.from_pandas(df)
+        del df, dfs
+        
+        print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns (seq excluded)")
     except Exception as e:
-        print(f"❌ Error loading data: {e}")
-        print("   Trying with smaller partitions...")
+        print(f"❌ Error loading data with Pandas: {e}")
+        print("   Trying original MerlinDataset method (will drop seq after loading)...")
         try:
-            dataset = MerlinDataset(data_path, engine='parquet', part_size='64MB')
+            dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
+            print("   Converting to GPU DataFrame...")
             gdf = dataset.to_ddf().compute()
-            print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
+            # Drop seq if it exists
+            if 'seq' in gdf.columns:
+                gdf = gdf.drop('seq', axis=1)
+                print("   ✅ Dropped 'seq' column")
+            print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
         except Exception as e2:
-            print(f"❌ Failed even with 64MB partitions: {e2}")
+            print(f"❌ Failed with MerlinDataset: {e2}")
             raise
     
-    # Prepare X and y (matching train_and_predict_GBDT.py exactly)
+    # Prepare X and y
     print("\n📊 Preparing data for GBDT...")
     if 'clicked' not in gdf.columns:
         raise ValueError("'clicked' column not found in data")
@@ -73,10 +106,12 @@ def load_processed_data_gbdt(data_path, drop_seq=True):
     y = gdf['clicked'].to_numpy()
     X = gdf.drop('clicked', axis=1)
     
-    # Drop seq column if requested (for GBDT)
-    if drop_seq and 'seq' in X.columns:
+    # Sanity check: seq should already be excluded
+    if 'seq' in X.columns:
+        print("   ⚠️  WARNING: 'seq' column still present, dropping now...")
         X = X.drop('seq', axis=1)
-        print("   ✅ Dropped 'seq' column")
+    
+    print(f"   ✅ Features ready: {X.shape[1]} columns (seq excluded)")
     
     # Convert all features to float32 (single pass) - matching train_and_predict_GBDT.py
     print("   Converting all features to float32 (single pass)...")

@@ -19,7 +19,8 @@ from utils import seed_everything, calculate_competition_score
 from data_loader import (
     ClickDatasetDNN,
     collate_fn_dnn_infer,
-    collate_fn_dnn_train
+    collate_fn_dnn_train,
+    load_processed_dnn_data
 )
 
 # Set seed for reproducibility
@@ -125,8 +126,10 @@ def parse_args():
     
     parser.add_argument('--model-dir', type=str, required=True,
                         help='Directory containing trained model (e.g., result_dnn_ddp/20231201_120000)')
-    parser.add_argument('--test-path', type=str, default='data/test.parquet',
-                        help='Path to test data')
+    parser.add_argument('--test-path', type=str, default='data/proc_test',
+                        help='Path to preprocessed test data (default: data/proc_test)')
+    parser.add_argument('--cal-path', type=str, default='data/proc_train_c',
+                        help='Path to preprocessed calibration data (default: data/proc_train_c)')
     parser.add_argument('--output-path', type=str, default=None,
                         help='Path to save submission file (default: {model_dir}/submission.csv)')
     parser.add_argument('--use-calibration', action='store_true', default=True,
@@ -205,46 +208,17 @@ def load_model_and_metadata(model_dir, device='cuda'):
     
     return model, cat_encoders, metadata
 
-def load_and_encode_test(test_path, cat_encoders, cat_cols, num_cols, seq_col, norm_stats, batch_size=2048):
-    """Load and encode test data, return dataset and dataloader"""
-    print(f"\n📦 Loading test data from {test_path}...")
+def load_test_data(test_path, num_cols, cat_cols, seq_col, batch_size=2048):
+    """Load preprocessed test data, return dataset and dataloader"""
+    print(f"\n📦 Loading preprocessed test data from {test_path}...")
     
-    test = pd.read_parquet(test_path, engine="pyarrow")
-    print(f"   Test shape: {test.shape}")
+    # Load preprocessed test data using the same loader as HPO
+    test_df = load_processed_dnn_data(test_path)
+    print(f"   ✅ Test data loaded: {test_df.shape}")
     
-    # Apply categorical encoding
-    print("   Encoding categorical features...")
-    for col in cat_cols:
-        if col in test.columns:
-            # Handle unknown values safely (test may have values not in training)
-            test_col = test[col].astype(str).fillna("UNK")
-            encoder = cat_encoders[col]
-            known_values = set(encoder.classes_)
-            
-            # Determine fallback value (prefer "UNK", else use most common class)
-            if "UNK" in known_values:
-                fallback = "UNK"
-            elif "0" in known_values:
-                fallback = "0"
-            else:
-                fallback = encoder.classes_[0]  # Use first class as fallback
-            
-            # Replace unseen values with fallback (vectorized operation)
-            mask = ~test_col.isin(known_values)
-            if mask.any():
-                n_unseen = mask.sum()
-                print(f"      [{col}] {n_unseen:,} unknown values → replaced with '{fallback}'")
-                test_col = test_col.copy()
-                test_col[mask] = fallback
-            
-            # Use transform with training encodings
-            test[col] = encoder.transform(test_col)
-    
-    print("   ✅ Test data loaded and encoded")
-    
-    # Create dataset and dataloader
+    # Create dataset and dataloader (no normalization needed, already normalized)
     print("   Creating dataset and dataloader...")
-    test_dataset = ClickDatasetDNN(test, num_cols, cat_cols, seq_col, norm_stats, has_target=False)
+    test_dataset = ClickDatasetDNN(test_df, num_cols, cat_cols, seq_col, has_target=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_fn_dnn_infer, pin_memory=True, 
                             num_workers=4, prefetch_factor=8)
@@ -253,7 +227,7 @@ def load_and_encode_test(test_path, cat_encoders, cat_cols, num_cols, seq_col, n
     
     return test_dataset, test_loader
 
-def find_best_calibration(model, cal_df, cat_cols, num_cols, seq_col, norm_stats, target_col, device='cuda', batch_size=2048, test_ratio=0.5):
+def find_best_calibration(model, cal_path, cat_cols, num_cols, seq_col, target_col, device='cuda', batch_size=2048, test_ratio=0.5):
     """
     Find best calibration method by comparing all methods on calibration test set
     
@@ -266,9 +240,13 @@ def find_best_calibration(model, cal_df, cat_cols, num_cols, seq_col, norm_stats
     print("🎯 Finding Best Calibration Method")
     print("="*70)
     
-    # Load calibration data
-    print("\n📦 Loading calibration data (train_c)...")
-    cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
+    # Load preprocessed calibration data
+    print(f"\n📦 Loading preprocessed calibration data from {cal_path}...")
+    cal_df = load_processed_dnn_data(cal_path)
+    print(f"   ✅ Loaded {len(cal_df):,} samples with {len(cal_df.columns)} features")
+    
+    # Create dataset and dataloader (no normalization needed, already normalized)
+    cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, target_col=target_col, has_target=True)
     cal_loader = DataLoader(cal_dataset, batch_size=batch_size, shuffle=False,
                            collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4)
     
@@ -461,6 +439,7 @@ def main():
     print("="*70)
     print(f"   Model directory: {args.model_dir}")
     print(f"   Test data: {args.test_path}")
+    print(f"   Calibration data: {args.cal_path}")
     print(f"   Use calibration: {args.use_calibration}")
     print(f"   Batch size: {args.batch_size}")
     print(f"   Device: {args.device}")
@@ -472,6 +451,9 @@ def main():
     if not os.path.exists(args.test_path):
         raise FileNotFoundError(f"Test data not found: {args.test_path}")
     
+    if args.use_calibration and not os.path.exists(args.cal_path):
+        raise FileNotFoundError(f"Calibration data not found: {args.cal_path}")
+    
     # Set output path
     if args.output_path is None:
         args.output_path = os.path.join(args.model_dir, 'submission.csv')
@@ -482,14 +464,7 @@ def main():
         args.device = 'cpu'
     
     # Load model and metadata
-    model, cat_encoders, metadata = load_model_and_metadata(args.model_dir, device=args.device)
-    
-    # Load normalization statistics
-    print("\n📊 Loading normalization statistics...")
-    with open('analysis/results/normalization_stats.json', 'r', encoding='utf-8') as f:
-        norm_stats_data = json.load(f)
-        norm_stats = norm_stats_data['statistics']
-    print("   ✅ Normalization statistics loaded")
+    model, _, metadata = load_model_and_metadata(args.model_dir, device=args.device)
     
     # Define feature columns
     cat_cols = metadata['cat_features']
@@ -497,65 +472,31 @@ def main():
     seq_col = "seq"
     FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
     
+    # Get numerical columns from metadata or infer from test data
+    # Load a sample of test data to determine feature columns
+    test_df_sample = load_processed_dnn_data(args.test_path)
+    feature_cols = [c for c in test_df_sample.columns if c not in FEATURE_EXCLUDE]
+    num_cols = [c for c in feature_cols if c not in cat_cols]
+    del test_df_sample
+    
+    print(f"\n📊 Features: Num={len(num_cols)} | Cat={len(cat_cols)}")
+    
     # Find best calibration method if enabled
     best_method = 'none'
     best_calibrator = None
     
     if args.use_calibration:
-        # Load calibration data
-        print("\n📦 Loading data for calibration selection...")
-        cal_df = pd.read_parquet("data/train_c.parquet", engine="pyarrow")
-        
-        # Encode categorical features
-        for col in cat_cols:
-            # Handle unknown values safely (though calibration is from training, be safe)
-            cal_col = cal_df[col].astype(str).fillna("UNK")
-            encoder = cat_encoders[col]
-            known_values = set(encoder.classes_)
-            
-            # Determine fallback value (prefer "UNK", else use most common class)
-            if "UNK" in known_values:
-                fallback = "UNK"
-            elif "0" in known_values:
-                fallback = "0"
-            else:
-                fallback = encoder.classes_[0]  # Use first class as fallback
-            
-            # Replace unseen values with fallback (vectorized operation)
-            mask = ~cal_col.isin(known_values)
-            if mask.any():
-                n_unseen = mask.sum()
-                print(f"      [{col}] {n_unseen:,} unknown values in calibration → replaced with '{fallback}'")
-                cal_col = cal_col.copy()
-                cal_col[mask] = fallback
-            
-            # Use transform with training encodings
-            cal_df[col] = encoder.transform(cal_col)
-        
-        # Get feature columns
-        feature_cols = [c for c in cal_df.columns if c not in FEATURE_EXCLUDE]
-        num_cols = [c for c in feature_cols if c not in cat_cols]
-        
-        # Find best calibration method
+        # Find best calibration method using preprocessed calibration data
         best_method, best_calibrator, _ = find_best_calibration(
-            model, cal_df, cat_cols, num_cols, seq_col, norm_stats, target_col,
+            model, args.cal_path, cat_cols, num_cols, seq_col, target_col,
             device=args.device, batch_size=args.batch_size
         )
     else:
         print("\n⚠️  Calibration disabled by user (--no-calibration)")
-        # Define numerical columns when calibration is disabled
-        # We need to load a sample to get all feature columns
-        import pyarrow.parquet as pq
-        table = pq.read_table(args.test_path)
-        all_columns = table.column_names
-        feature_cols = [c for c in all_columns if c not in FEATURE_EXCLUDE]
-        num_cols = [c for c in feature_cols if c not in cat_cols]
     
-    print(f"\n📊 Features: Num={len(num_cols)} | Cat={len(cat_cols)}")
-    
-    # Load and encode test data with dataset and dataloader
-    test_dataset, test_loader = load_and_encode_test(
-        args.test_path, cat_encoders, cat_cols, num_cols, seq_col, norm_stats, 
+    # Load preprocessed test data with dataset and dataloader
+    test_dataset, test_loader = load_test_data(
+        args.test_path, num_cols, cat_cols, seq_col, 
         batch_size=args.batch_size
     )
     
