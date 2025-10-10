@@ -3,14 +3,15 @@
 데이터셋 분할 및 NVTabular 전처리 통합 스크립트
 
 Pipeline:
-1. 전체 train.parquet로 NVTabular workflow fit (통계 생성)
-2. train을 train_t(80%), train_v(10%), train_c(10%)로 분할
-3. train_t에서 10% stratified sampling하여 train_hpo 생성
-4. l_feat_20, l_feat_23 제거 (상수 피처), seq는 유지
-5. 동일한 workflow로 모든 데이터 전처리:
+1. train.parquet를 train_t(80%), train_v(10%), train_c(10%)로 분할
+2. train_t에서 10% stratified sampling하여 train_hpo 생성
+3. ⚠️  train_t로만 NVTabular workflow fit (Data Leakage 방지!)
+4. 나머지(val/cal/hpo/test)는 train_t 통계로 transform만 수행
+5. l_feat_20, l_feat_23 제거 (상수 피처), seq는 유지
+6. 전처리 결과 저장:
    - data/proc_train_t, data/proc_train_v, data/proc_train_c, 
    - data/proc_train_hpo, data/proc_test
-6. 임시 파일 자동 정리 (data/tmp 삭제)
+7. 임시 파일 자동 정리 (data/tmp 삭제)
 
 제외 컬럼:
 - l_feat_20, l_feat_23: 상수 피처 (정보 없음)
@@ -31,8 +32,8 @@ Features:
 - Continuous: 
   1. Normalize: Standardization (mean=0, std=1) 먼저 수행
      - 결측치 없는 실제 데이터로 mean/std 계산
-     - 전체 train.parquet의 통계 사용
-     - 모든 split에 동일한 통계 적용
+     - ⚠️  train_t로만 통계 계산 (Data Leakage 방지!)
+     - 모든 split에 train_t 통계 적용
   2. FillMissing(0): 표준화 후 결측치를 0으로 대체
      - 표준화 공간에서 0 = 원래 평균값
      - 실질적으로 평균값 imputation 효과
@@ -52,7 +53,8 @@ Features:
 
 장점:
 - ✅ 공통 전처리 데이터 1벌로 GBDT/DNN 모두 사용
-- ✅ 모든 split이 동일한 normalization 통계 사용
+- ✅ Data Leakage 방지 (train_t로만 통계 계산)
+- ✅ 모든 split이 train_t 통계로 일관성 유지
 - ✅ Test도 미리 전처리되어 prediction 빠름
 - ✅ HPO용 작은 dataset으로 빠른 실험
 - ✅ Stratified sampling으로 분포 유지
@@ -311,8 +313,7 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print("   유지: seq (DNN용, GBDT는 로더에서 제거)")
     
     splits = {
-        'full': df_full,      # workflow fit용
-        'train_t': df_train_t,
+        'train_t': df_train_t,  # workflow fit용 (통계 계산)
         'train_v': df_train_v,
         'train_c': df_train_c,
         'train_hpo': df_train_hpo
@@ -336,18 +337,20 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
         
         del df_clean
     
-    # 메모리 정리
+    # 메모리 정리 (df_full은 이미 사용 완료)
     del df_full, df_train_t, df_train_v, df_train_c, df_train_hpo, splits
     gc.collect()
+    print(f"\n  🧹 메모리 정리 완료")
     
     # =================================================================
-    # Step 3: NVTabular Workflow Fit (전체 데이터로, DNN용)
+    # Step 3: NVTabular Workflow Fit (train_t만 사용)
     # =================================================================
     print("\n" + "=" * 80)
-    print("🔧 Step 3: NVTabular Workflow Fit (전체 데이터 통계)")
+    print("🔧 Step 3: NVTabular Workflow Fit (train_t ONLY - Data Leakage 방지)")
     print("=" * 80)
-    print("   seq 포함, continuous만 standardization")
-    print("   categorical은 raw 유지 (DNN 자체 LabelEncoder 사용)")
+    print("   ✅ train_t로만 통계 계산 (val/cal은 transform만)")
+    print("   ✅ seq 포함, continuous만 standardization")
+    print("   ✅ categorical은 raw 유지 (DNN 자체 LabelEncoder 사용)")
     
     # GPU 메모리 관리 초기화
     try:
@@ -367,21 +370,23 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     
     from merlin.io import Dataset
     
-    # 전체 데이터로 workflow fit (큰 파티션으로 메모리 효율 개선)
-    print(f"\n📊 Workflow fitting on full data ({total_rows:,} rows)...")
+    # train_t로만 workflow fit (data leakage 방지)
+    print(f"\n📊 Workflow fitting on train_t ONLY ({train_size:,} rows)...")
     print("   ⚡ Part size: 128MB (메모리 효율)")
-    full_dataset = Dataset(temp_files['full'], engine='parquet', part_size='128MB')
+    print("   ⚠️  중요: train_t로만 통계 계산 (val/cal/test 정보 누출 방지)")
+    
+    train_dataset = Dataset(temp_files['train_t'], engine='parquet', part_size='128MB')
     
     workflow = create_workflow_dnn()
     
     # Fit with memory cleanup
-    print("   🔧 Fitting workflow...")
-    workflow.fit(full_dataset)
-    print("  ✅ Workflow fitted on full train data (DNN용)")
+    print("   🔧 Fitting workflow on train_t...")
+    workflow.fit(train_dataset)
+    print("  ✅ Workflow fitted on train_t only (val/cal/test는 transform만)")
     
     # Workflow는 메모리에만 유지 (저장 안 함)
     
-    del full_dataset
+    del train_dataset
     gc.collect()
     
     # GPU 메모리 정리
@@ -399,28 +404,23 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print("⚙️  Step 4: Transform 각 split (동일한 통계 적용)")
     print("=" * 80)
     
-    # temp_files의 키와 output_dirs의 키 매핑
-    transform_mapping = {
-        'train_t': 'gbdt_train_t',
-        'train_v': 'gbdt_train_v',
-        'train_c': 'gbdt_train_c',
-        'train_hpo': 'gbdt_train_hpo'
-    }
+    # Transform 순서: train_t, train_v, train_c, train_hpo
+    splits_to_transform = ['train_t', 'train_v', 'train_c', 'train_hpo']
     
-    for temp_key, output_key in transform_mapping.items():
-        print(f"\n🔄 Processing {output_key}...")
+    for split_name in splits_to_transform:
+        print(f"\n🔄 Processing {split_name}...")
         
         # Dataset 생성 (큰 파티션으로 메모리 효율 개선)
-        dataset = Dataset(temp_files[temp_key], engine='parquet', part_size='128MB')
+        dataset = Dataset(temp_files[split_name], engine='parquet', part_size='128MB')
         
         # Transform
-        output_dir = output_dirs[output_key]
+        output_dir = output_dirs[split_name]
         workflow.transform(dataset).to_parquet(
             output_path=output_dir,
             shuffle=None,
             out_files_per_proc=4  # 파일 수 줄여서 메모리 절약
         )
-        print(f"  ✅ {temp_key} transformed → {output_dir}")
+        print(f"  ✅ {split_name} transformed → {output_dir}")
         
         del dataset
         gc.collect()
@@ -525,13 +525,14 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print(f"  - seq 포함 (DNN용, GBDT는 로더에서 제거)")
     print(f"    * seq 결측치 처리: 빈 문자열/NaN → '0.0'")
     print(f"  - l_feat_20, l_feat_23 제거 (상수 피처)")
-    print(f"  - 전체 train.parquet로 workflow fit (통계 일관성 보장)")
+    print(f"  ⚠️  중요: train_t로만 workflow fit (Data Leakage 방지!)")
+    print(f"    * val/cal/test는 train_t 통계로 transform만 수행")
     print(f"  - Categorical: raw 유지 (DNN 자체 LabelEncoder 사용)")
     print(f"  - Continuous: Normalize → FillMissing(0) (110개 피처)")
-    print(f"    * Normalize 먼저: 실제 분포로 mean/std 계산")
+    print(f"    * Normalize 먼저: train_t의 실제 분포로 mean/std 계산")
     print(f"    * FillMissing(0) 나중: 표준화 공간에서 평균값으로 imputation")
     print(f"  - Normalization: Standardization (mean=0, std=1)")
-    print(f"  - 모든 split에 동일한 normalization 통계 적용")
+    print(f"  - 모든 split에 train_t 통계 적용 (일관성 보장)")
     
     print("\n💡 사용 방법:")
     print("\n  [GBDT 모델 - train_gbdt.py, hpo_xgboost.py]")
