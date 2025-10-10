@@ -1,11 +1,13 @@
 # DNN (WideDeepCTR) Hyperparameter Optimization using Optuna
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
+# Multi-GPU support: Use all available GPUs for HPO
+# Default to GPUs 0-7 (8 GPUs) if not specified
+os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7')
 import warnings
 warnings.filterwarnings('ignore')
 
-print("✅ Environment configured for DNN HPO")
+print("✅ Environment configured for DNN HPO (Multi-GPU - 8 GPUs default)")
 
 # Standard library
 import argparse
@@ -16,18 +18,18 @@ import time
 # Third-party libraries
 import numpy as np
 import optuna
-import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
+from lightning.fabric import Fabric
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 from sklearn.metrics import average_precision_score
-from sklearn.preprocessing import LabelEncoder
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Custom modules
+from data_loader import ClickDatasetDNN, collate_fn_dnn_train, load_processed_dnn_data
 from mixup import mixup_batch_torch
 
 print(f"✅ PyTorch version: {torch.__version__}")
@@ -82,59 +84,6 @@ def clear_gpu_memory():
         print(f"⚠️ Error clearing GPU memory: {e}")
         gc.collect()
 
-class ClickDataset(Dataset):
-    def __init__(self, df, num_cols, cat_cols, seq_col, norm_stats, target_col=None, has_target=True):
-        self.df = df.reset_index(drop=True)
-        self.num_cols = num_cols
-        self.cat_cols = cat_cols
-        self.seq_col = seq_col
-        self.target_col = target_col
-        self.has_target = has_target
-        
-        # Standardize numerical features using normalization_stats.json
-        num_data = self.df[self.num_cols].astype(float)
-        for col in self.num_cols:
-            if col in norm_stats:
-                mean = norm_stats[col]['mean']
-                std = norm_stats[col]['std']
-                # Avoid division by zero
-                if std > 0:
-                    num_data[col] = (num_data[col] - mean) / std
-        self.num_X = num_data.fillna(0).values
-        
-        self.cat_X = self.df[self.cat_cols].astype(int).values
-        self.seq_strings = self.df[self.seq_col].astype(str).values
-        if self.has_target:
-            self.y = self.df[self.target_col].astype(np.float32).values
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        num_x = torch.tensor(self.num_X[idx], dtype=torch.float)
-        cat_x = torch.tensor(self.cat_X[idx], dtype=torch.long)
-        s = self.seq_strings[idx]
-        if s:
-            arr = np.fromstring(s, sep=",", dtype=np.float32)
-        else:
-            arr = np.array([0.0], dtype=np.float32)
-        seq = torch.from_numpy(arr)
-        if self.has_target:
-            y = torch.tensor(self.y[idx], dtype=torch.float)
-            return num_x, cat_x, seq, y
-        else:
-            return num_x, cat_x, seq
-
-def collate_fn_train(batch):
-    num_x, cat_x, seqs, ys = zip(*batch)
-    num_x = torch.stack(num_x)
-    cat_x = torch.stack(cat_x)
-    ys = torch.stack(ys)
-    seqs_padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0.0)
-    seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
-    seq_lengths = torch.clamp(seq_lengths, min=1)
-    return num_x, cat_x, seqs_padded, seq_lengths, ys
-
 class CrossNetwork(nn.Module):
     def __init__(self, input_dim, num_layers=2):
         super().__init__()
@@ -188,61 +137,48 @@ class WideDeepCTR(nn.Module):
         out = self.mlp(z_cross)
         return out.squeeze(1)
 
-def load_and_prepare_data(train_path, subsample_ratio=1.0, seed=42):
-    """Load and prepare data for HPO (from pre-processed directory)"""
-    print(f"\n📦 Loading data from {train_path}...")
-    start_load = time.time()
+def get_categorical_cardinalities(train_df, val_df, cat_cols):
+    """
+    Calculate categorical cardinalities from pre-encoded data
     
-    # Check if it's a directory (pre-processed) or file (legacy)
-    if os.path.isdir(train_path):
-        # Load pre-processed data from dataset_split_and_preprocess.py
-        from merlin.io import Dataset as MerlinDataset
-        dataset = MerlinDataset(train_path, engine='parquet', part_size='128MB')
-        gdf = dataset.to_ddf().compute()
-        train_df = gdf.to_pandas()
-        print(f"   ✅ Loaded pre-processed data: {len(train_df):,} rows x {len(train_df.columns)} columns")
-        print(f"      (continuous standardized, seq 결측치 처리됨)")
-    else:
-        # Legacy: Load raw parquet file
-        train_df = pd.read_parquet(train_path, engine="pyarrow")
-        print(f"   ✅ Loaded data: {len(train_df):,} rows x {len(train_df.columns)} columns")
+    Args:
+        train_df: Training dataframe (already Categorify-encoded)
+        val_df: Validation dataframe (already Categorify-encoded)
+        cat_cols: List of categorical column names
     
-    # Subsample if needed
-    if subsample_ratio < 1.0:
-        if 'clicked' in train_df.columns:
-            train_pos = train_df[train_df['clicked'] == 1]
-            train_neg = train_df[train_df['clicked'] == 0]
-            
-            n_pos = int(len(train_pos) * subsample_ratio)
-            n_neg = int(len(train_neg) * subsample_ratio)
-            
-            train_df = pd.concat([
-                train_pos.sample(n=min(n_pos, len(train_pos)), random_state=seed),
-                train_neg.sample(n=min(n_neg, len(train_neg)), random_state=seed)
-            ]).reset_index(drop=True)
-            print(f"   📊 Stratified subsampled to {len(train_df):,} rows (ratio={subsample_ratio})")
-    
-    print(f"   Time: {time.time() - start_load:.1f}s")
-    return train_df
-
-def prepare_features(train_df, cat_cols):
-    """Encode categorical features"""
-    print("\n🔧 Encoding categorical features...")
-    encoders = {}
+    Returns:
+        dict: {column_name: cardinality}
+    """
+    print("\n🔧 Calculating categorical cardinalities...")
+    cat_cardinalities = {}
     for col in cat_cols:
-        le = LabelEncoder()
-        train_df[col] = le.fit_transform(train_df[col].astype(str).fillna("UNK"))
-        encoders[col] = le
-        print(f"   {col}: {len(le.classes_)} unique categories")
+        # Get max value across train/val to determine cardinality
+        max_val = max(train_df[col].max(), val_df[col].max())
+        # Cardinality = max_index + 1 (since 0-based indexing)
+        cat_cardinalities[col] = int(max_val) + 1
+        print(f"   {col}: {cat_cardinalities[col]} unique categories")
     
-    return train_df, encoders
+    return cat_cardinalities
 
 def worker_init_fn(worker_id):
     os.sched_setaffinity(0, range(os.cpu_count()))
 
-def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats, 
-              cat_encoders, target_col, device, use_mixup=True):
-    """Optuna objective function for DNN"""
+def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, 
+              cat_cardinalities, target_col, num_devices, use_mixup=True):
+    """Optuna objective function for DNN with Fabric
+    
+    Note: For Optuna compatibility, we use single-process execution.
+    Each trial runs on a single GPU (or uses DataParallel on multiple GPUs).
+    """
+    
+    # For Optuna compatibility, we use devices=1 and let PyTorch handle multi-GPU
+    # Alternatively, we could use DataParallel within Fabric
+    fabric = Fabric(
+        accelerator="cuda" if torch.cuda.is_available() else "cpu",
+        devices=1,  # Single process for Optuna compatibility
+        strategy="auto",
+        precision="32-true"
+    )
     
     print(f"\n{'='*70}")
     print(f"🔍 Starting Trial {trial.number}")
@@ -288,35 +224,53 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
         print(f"   mixup_alpha: {mixup_alpha:.3f}")
         print(f"   mixup_prob: {mixup_prob:.3f}")
     
-    # Create datasets
-    train_dataset = ClickDataset(train_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
-    val_dataset = ClickDataset(val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
+    # Create datasets (data already preprocessed by dataset_split_and_preprocess.py)
+    train_dataset = ClickDatasetDNN(train_df, num_cols, cat_cols, seq_col, target_col, True)
+    val_dataset = ClickDatasetDNN(val_df, num_cols, cat_cols, seq_col, target_col, True)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_fn_train, pin_memory=True, num_workers=24,
+                              collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
                               worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            collate_fn=collate_fn_train, pin_memory=True, num_workers=24,
+                            collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
                             worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     
     # Create model
-    cat_cardinalities = [len(cat_encoders[c].classes_) for c in cat_cols]
+    # cat_cardinalities는 dict → list 변환
+    cat_cardinalities_list = [cat_cardinalities[c] for c in cat_cols]
     model = WideDeepCTR(
         num_features=len(num_cols),
-        cat_cardinalities=cat_cardinalities,
+        cat_cardinalities=cat_cardinalities_list,
         emb_dim=emb_dim,
         lstm_hidden=lstm_hidden,
         hidden_units=hidden_units,
         dropout=dropout_rates,
         cross_layers=cross_layers
-    ).to(device)
+    )
     
     # Setup training
     pos_weight_value = (len(train_df) - train_df[target_col].sum()) / train_df[target_col].sum()
-    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    pos_weight = torch.tensor([pos_weight_value], dtype=torch.float)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # Setup model and optimizer with Fabric
+    model, optimizer = fabric.setup(model, optimizer)
+    
+    # Apply DataParallel if multiple GPUs are available (for Optuna compatibility)
+    if num_devices > 1 and torch.cuda.device_count() > 1:
+        actual_devices = min(num_devices, torch.cuda.device_count())
+        print(f"   Using DataParallel with {actual_devices} GPUs")
+        model = nn.DataParallel(model.module if hasattr(model, 'module') else model, 
+                                device_ids=list(range(actual_devices)))
+    
+    # Setup dataloaders with Fabric
+    train_loader = fabric.setup_dataloaders(train_loader)
+    val_loader = fabric.setup_dataloaders(val_loader)
+    
+    # Move pos_weight to device and create criterion
+    pos_weight = pos_weight.to(fabric.device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
     # Training (single epoch)
     model.train()
@@ -325,19 +279,14 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     
     # Use tqdm for training progress
     train_pbar = tqdm(train_loader, desc=f"Trial {trial.number} Training", leave=False)
+    
     for num_x, cat_x, seqs, lens, ys in train_pbar:
-        num_x = num_x.to(device)
-        cat_x = cat_x.to(device)
-        seqs = seqs.to(device)
-        lens = lens.to(device)
-        ys = ys.to(device)
-        
         optimizer.zero_grad()
         
         # Apply MixUp with probability if enabled
         if use_mixup and np.random.rand() < mixup_prob:
             # MixUp for numerical features
-            num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=device)
+            num_x_mixed, ys_mixed, _ = mixup_batch_torch(num_x, ys, alpha=mixup_alpha, device=fabric.device)
             
             # For categorical and sequence features, we keep them from the first sample
             logits = model(num_x_mixed, cat_x, seqs, lens)
@@ -346,7 +295,8 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
             logits = model(num_x, cat_x, seqs, lens)
             loss = criterion(logits, ys)
         
-        loss.backward()
+        # Use fabric.backward instead of loss.backward()
+        fabric.backward(loss)
         optimizer.step()
         
         batch_loss = loss.item()
@@ -368,13 +318,8 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     
     with torch.no_grad():
         val_pbar = tqdm(val_loader, desc=f"Trial {trial.number} Validation", leave=False)
+        
         for num_x, cat_x, seqs, lens, ys in val_pbar:
-            num_x = num_x.to(device)
-            cat_x = cat_x.to(device)
-            seqs = seqs.to(device)
-            lens = lens.to(device)
-            ys = ys.to(device)
-            
             logits = model(num_x, cat_x, seqs, lens)
             loss = criterion(logits, ys)
             val_loss += loss.item() * ys.size(0)
@@ -405,26 +350,42 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     return score
 
 def run_optimization(train_t_path, train_v_path, n_trials=50,
-                     timeout=None, seed=42, use_mixup=True):
-    """Run Optuna optimization using pre-split train_t and train_v data"""
+                     timeout=None, seed=42, use_mixup=True, num_devices=None):
+    """Run Optuna optimization using pre-split data with Fabric DDP"""
     print("\n" + "="*70)
-    print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna")
+    print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna + Fabric DDP")
     print("="*70)
     print(f"   MixUp enabled: {use_mixup}")
     
     # Set seed
     seed_everything(seed)
     
-    # Setup device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n🖥️  Device: {device}")
+    # Setup device configuration
+    if torch.cuda.is_available():
+        available_gpus = torch.cuda.device_count()
+        if num_devices is None:
+            num_devices = min(available_gpus, 8)  # Default to 8 GPUs
+        else:
+            num_devices = min(num_devices, available_gpus)
+        
+        print("\n🖥️  GPU Configuration:")
+        print(f"   Available GPUs: {available_gpus}")
+        print(f"   Using GPUs: {num_devices}")
+        for i in range(num_devices):
+            print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+        print("   Strategy: Fabric + DataParallel (Optuna compatible)")
+    else:
+        num_devices = 1
+        print("\n🖥️  Device: CPU (CUDA not available)")
     
     # Load data
     print(f"\n📦 Loading training data from {train_t_path}...")
-    train_df = load_and_prepare_data(train_t_path, 1.0, seed)
+    train_df = load_processed_dnn_data(train_t_path)
+    print(f"   ✅ Loaded {len(train_df):,} rows x {len(train_df.columns)} columns")
     
     print(f"\n📦 Loading validation data from {train_v_path}...")
-    val_df = load_and_prepare_data(train_v_path, 1.0, seed)
+    val_df = load_processed_dnn_data(train_v_path)
+    print(f"   ✅ Loaded {len(val_df):,} rows x {len(val_df.columns)} columns")
     
     # Define features
     target_col = "clicked"
@@ -433,20 +394,21 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
     FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
     feature_cols = [c for c in train_df.columns if c not in FEATURE_EXCLUDE]
     
-    cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
+    # Categorical columns (based on analysis/results/feature_classification.json)
+    cat_cols = ["gender", "age_group", "inventory_id"]
     num_cols = [c for c in feature_cols if c not in cat_cols]
     
     print("\n📊 Features:")
     print(f"   Numerical: {len(num_cols)}")
     print(f"   Categorical: {len(cat_cols)}")
     
-    # Encode categorical features
-    train_df, cat_encoders = prepare_features(train_df, cat_cols)
+    # Calculate categorical cardinalities (data is already Categorify-encoded)
+    cat_cardinalities = get_categorical_cardinalities(train_df, val_df, cat_cols)
     
-    # Normalization stats not needed - data is already standardized
-    # Pass empty dict to ClickDataset (it will skip standardization)
-    norm_stats = {}
-    print("   ⚠️  Normalization skipped - data is already standardized by dataset_split_and_preprocess.py")
+    print("   ✅ Data already preprocessed by dataset_split_and_preprocess.py:")
+    print("      - Categorical: Categorify-encoded (0-based indices)")
+    print("      - Numerical: Normalized (mean=0, std=1)")
+    print("      - Missing values: Filled with 0")
     
     print("\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
@@ -473,7 +435,7 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
     study.optimize(
         lambda trial: objective(
             trial, train_df, val_df, num_cols, cat_cols, seq_col, 
-            norm_stats, cat_encoders, target_col, device, use_mixup
+            cat_cardinalities, target_col, num_devices, use_mixup
         ),
         n_trials=n_trials,
         timeout=timeout,
@@ -514,7 +476,8 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
     best_params = study.best_params
     
     # Basic training parameters
-    config['BATCH_SIZE'] = best_params['batch_size']
+    # Note: batch_size is fixed at 512 in HPO, not tuned
+    config['BATCH_SIZE'] = best_params.get('batch_size', 512)
     config['LEARNING_RATE'] = best_params['learning_rate']
     config['WEIGHT_DECAY'] = best_params['weight_decay']
     
@@ -562,8 +525,8 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
 def main():
     parser = argparse.ArgumentParser(description='DNN (WideDeepCTR) Hyperparameter Optimization')
     
-    parser.add_argument('--train-t-path', type=str, default='data/proc_train_t',
-                        help='Path to training data (default: data/proc_train_t)')
+    parser.add_argument('--train-t-path', type=str, default='data/proc_train_hpo',
+                        help='Path to training data (default: data/proc_train_hpo)')
     parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
                         help='Path to validation data (default: data/proc_train_v)')
     parser.add_argument('--n-trials', type=int, default=50,
@@ -576,12 +539,21 @@ def main():
                         help='Enable MixUp data augmentation (default: True)')
     parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
                         help='Disable MixUp data augmentation')
-    parser.add_argument('--output-config', type=str, default='config_widedeep_optimized.yaml',
-                        help='Output config file path (default: config_widedeep_optimized.yaml)')
+    parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
+                        help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_widedeep.yaml',
                         help='Original config file path (default: config_widedeep.yaml)')
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='Comma-separated GPU IDs to use (e.g., "0,1,2,3,4,5,6,7"). If not specified, uses CUDA_VISIBLE_DEVICES env var or default "0,1,2,3,4,5,6,7"')
+    parser.add_argument('--num-devices', type=int, default=None,
+                        help='Number of GPU devices to use with DataParallel (default: auto-detect, max 8)')
     
     args = parser.parse_args()
+    
+    # Override CUDA_VISIBLE_DEVICES if --gpus is specified
+    if args.gpus:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
+        print(f"\n🖥️  Using GPUs: {args.gpus}")
     
     print("\n🔧 HPO Configuration:")
     print(f"   Train data: {args.train_t_path}")
@@ -601,7 +573,8 @@ def main():
         n_trials=args.n_trials,
         timeout=args.timeout,
         seed=args.seed,
-        use_mixup=args.use_mixup
+        use_mixup=args.use_mixup,
+        num_devices=args.num_devices
     )
     
     # Save results

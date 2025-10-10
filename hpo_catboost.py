@@ -3,17 +3,9 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 
+# CatBoost logging 환경변수 제거
 for k in ("CATBOOST_LOGGING_LEVEL", "CATBOOST_VERBOSE", "CATBOOST_SILENT"):
     os.environ.pop(k, None)
-
-LOG_KEYS = ("verbose", "logging_level", "verbose_eval", "silent")
-
-def sanitize_logging(params: dict) -> dict:
-    p = dict(params)
-    for k in LOG_KEYS:
-        p.pop(k, None)
-    return p
-
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -27,25 +19,32 @@ except RuntimeError:
 
 print("✅ Environment configured for CatBoost HPO (GPU-handle-safe)")
 
-# Core imports
+# Standard library
+import argparse
 import gc
 import time
-import numpy as np
-import argparse
-import yaml
 
-# GPU libraries
+# Third-party libraries
+import catboost as cb
 import cupy as cp
+import numpy as np
+import optuna
+import yaml
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+from sklearn.linear_model import LogisticRegression
 
 # RMM / cuDF allocator initialization
 try:
-    import rmm, cudf
+    import cudf
+    import rmm
+    
     rmm.reinitialize(
         pool_allocator=True,
         initial_pool_size="10GB",
-        managed_memory=False,   # 🔧 충돌 가능성 낮춤
+        managed_memory=False,   # 🔧 CatBoost GPU 안정성
     )
-    cudf.set_allocator("managed")  # cuDF는 managed로 유지
+    cudf.set_allocator("managed")
     print("✅ RMM initialized (pool=10GB, managed_memory=False)")
 except Exception as e:
     print(f"⚠️ RMM init skipped: {e}")
@@ -56,261 +55,144 @@ try:
 except Exception as e:
     print(f"⚠️ Could not select CUDA device 0: {e}")
 
-# ML libraries
-import catboost as cb
-from sklearn.metrics import average_precision_score
-from sklearn.model_selection import train_test_split
-
-# Optuna
-import optuna
-from optuna.pruners import MedianPruner
-from optuna.samplers import TPESampler
-
-# NVTabular
-import nvtabular as nvt
-from nvtabular import ops
-from merlin.io import Dataset
-
-# MixUp
+# Custom modules
+from data_loader import load_processed_data_gbdt
 from mixup import apply_mixup_to_dataset
+from utils import calculate_competition_score, clear_gpu_memory
 
 print(f"✅ CatBoost version: {cb.__version__}")
 print(f"✅ Optuna version: {optuna.__version__}")
 
-def calculate_weighted_logloss(y_true, y_pred, eps=1e-15):
-    """Calculate Weighted LogLoss with 50:50 class weights"""
-    y_pred = np.clip(y_pred, eps, 1 - eps)
-    mask_0 = (y_true == 0)
-    mask_1 = (y_true == 1)
-    ll_0 = -np.mean(np.log(np.clip(1 - y_pred[mask_0], eps, 1 - eps))) if mask_0.sum() > 0 else 0.0
-    ll_1 = -np.mean(np.log(np.clip(y_pred[mask_1], eps, 1 - eps))) if mask_1.sum() > 0 else 0.0
-    return 0.5 * ll_0 + 0.5 * ll_1
+# Logging 파라미터 정리 함수
+LOG_KEYS = ("verbose", "logging_level", "verbose_eval", "silent")
 
-def calculate_competition_score(y_true, y_pred):
-    """0.5*AP + 0.5*(1/(1+WLL))"""
-    ap = average_precision_score(y_true, y_pred)
-    wll = calculate_weighted_logloss(y_true, y_pred)
-    score = 0.5 * ap + 0.5 * (1 / (1 + wll))
-    return score, ap, wll
+def sanitize_logging(params: dict) -> dict:
+    """Remove logging parameters from CatBoost params"""
+    p = dict(params)
+    for k in LOG_KEYS:
+        p.pop(k, None)
+    return p
 
-def clear_gpu_memory():
+def clear_catboost_gpu_memory():
     """Clear GPU memory and reset CatBoost CUDA handles"""
-    try:
-        cp.get_default_memory_pool().free_all_blocks()
-    except Exception:
-        pass
-    try:
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-    except Exception:
-        pass
+    # 기본 GPU 메모리 정리
+    clear_gpu_memory()
+    
     # 🔧 CatBoost GPU 핸들 완전 초기화
     try:
         cb._catboost._reset_cuda_manager()
-    except Exception as e:
+    except Exception:
         # 일부 버전에서 심볼이 없을 수 있음
-        print(f"ℹ️ CatBoost CUDA manager reset not available: {e}")
+        pass
+    
+    # 추가 메모리 정리
     gc.collect()
-
-def create_workflow():
-    """Create NVTabular workflow optimized for GBDT models"""
-    print("\n🔧 Creating GBDT-optimized workflow...")
-
-    # TRUE CATEGORICAL COLUMNS (only 5)
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-
-    # CONTINUOUS COLUMNS (110 total, l_feat_20, l_feat_23 제외)
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +   # 18
-        [f'feat_b_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_c_{i}' for i in range(1, 9)] +    # 8
-        [f'feat_d_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_e_{i}' for i in range(1, 11)] +   # 10
-        [f'history_a_{i}' for i in range(1, 8)] +   # 7
-        [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25
-    )
-
-    print(f"   Categorical: {len(true_categorical)} columns")
-    print(f"   Continuous: {len(all_continuous)} columns")
-    print(f"   Total features: {len(true_categorical) + len(all_continuous)}")
-
-    # Minimal preprocessing for GBDT models
-    cat_features = true_categorical >> ops.Categorify(freq_threshold=0, max_size=50000)
-    cont_features = all_continuous >> ops.FillMissing(fill_val=0)
-
-    workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
-    print("   ✅ Workflow created (no normalization for tree models)")
-    return workflow
-
-def process_data_with_nvtabular(data_path, temp_dir='tmp'):
-    """Process data with NVTabular (matching train_and_predict_GBDT.py)"""
-    import pandas as pd
-    import pyarrow.parquet as pq
-
-    print("\n" + "="*70)
-    print("🚀 NVTabular Data Processing")
-    print("="*70)
-
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # Prepare data without 'seq' column
-    temp_path = f'{temp_dir}/train_no_seq.parquet'
-    if not os.path.exists(temp_path):
-        print("\n📋 Creating temp file without 'seq' column...")
-        pf = pq.ParquetFile(data_path)
-        cols = [c for c in pf.schema.names if c not in ['seq', '']]
-        print(f"   Total columns: {len(pf.schema.names)}")
-        print(f"   Using columns: {len(cols)} (excluded 'seq')")
-
-        df = pd.read_parquet(data_path, columns=cols)
-        print(f"   Loaded {len(df):,} rows")
-        df.to_parquet(temp_path, index=False)
-        del df
-        gc.collect()
-        print("   ✅ Temp file created")
-    else:
-        print(f"✅ Using existing temp file: {temp_path}")
-
-    # Create dataset with balanced partitions
-    print("\n📦 Creating NVTabular Dataset...")
-    print("   Using 64MB partitions for better throughput vs memory")
-    clear_gpu_memory()
-
-    dataset = Dataset(temp_path, engine='parquet', part_size='64MB')
-    print("   ✅ Dataset created")
-
-    # Create and fit workflow
-    print("\n📊 Fitting workflow...")
-    workflow = create_workflow()
-    workflow.fit(dataset)
-    print("   ✅ Workflow fitted")
-
-    # Transform and return processed data
-    print(f"\n💾 Transforming data...")
-    clear_gpu_memory()
-
+    gc.collect()  # 두 번 호출하여 순환 참조 제거
+    
+    # CUDA 컨텍스트 동기화
     try:
-        gdf = workflow.transform(dataset).to_ddf().compute()
-        print(f"   ✅ Data processed: {len(gdf):,} rows x {len(gdf.columns)} columns")
-        return gdf
-    except Exception as e:
-        print(f"❌ Error during processing: {e}")
-        raise
+        cp.cuda.Stream.null.synchronize()
+    except Exception:
+        pass
+    
+    time.sleep(0.5)  # GPU 핸들 해제 대기
 
-def load_processed_data(data_path, subsample_ratio=1.0):
-    """Load processed data (matching train_and_predict_GBDT.py exactly)"""
-    print(f"\n📦 Loading data from {data_path}...")
-    start_load = time.time()
-    
-    # Check if it's NVTabular processed data or raw parquet
-    if os.path.isdir(data_path):
-        try:
-            dataset = Dataset(data_path, engine='parquet', part_size='128MB')
-            print("   Converting to GPU DataFrame...")
-            gdf = dataset.to_ddf().compute()
-            print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
-        except Exception as e:
-            print(f"❌ Error loading data: {e}")
-            print("   Trying with even smaller partitions...")
-            dataset = Dataset(data_path, engine='parquet', part_size='64MB')
-            gdf = dataset.to_ddf().compute()
-            print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
-    else:
-        gdf = process_data_with_nvtabular(data_path)
-    
-    # Subsample if needed
-    if subsample_ratio < 1.0:
-        n_samples = int(len(gdf) * subsample_ratio)
-        if 'clicked' in gdf.columns:
-            gdf_pos = gdf[gdf['clicked'] == 1]
-            gdf_neg = gdf[gdf['clicked'] == 0]
-            n_pos = int(len(gdf_pos) * subsample_ratio)
-            n_neg = int(len(gdf_neg) * subsample_ratio)
-            gdf = cudf.concat([
-                gdf_pos.sample(n=min(n_pos, len(gdf_pos)), random_state=42),
-                gdf_neg.sample(n=min(n_neg, len(gdf_neg)), random_state=42)
-            ]).reset_index(drop=True)
-            print(f"   📊 Stratified subsampled to {len(gdf):,} rows (ratio={subsample_ratio})")
-        else:
-            gdf = gdf.sample(n=n_samples, random_state=42).reset_index(drop=True)
-            print(f"   📊 Subsampled to {len(gdf):,} rows (ratio={subsample_ratio})")
-    
-    # Prepare X and y
-    print("\n📊 Preparing data for GBDT...")
-    if 'clicked' not in gdf.columns:
-        raise ValueError("'clicked' column not found in data")
-    
-    y = gdf['clicked'].to_numpy()
-    X = gdf.drop('clicked', axis=1)
-    
-    print("   Converting all features to float32 (single pass)...")
-    try:
-        X = X.astype('float32', copy=False)
-    except Exception as e:
-        print(f"   ⚠️ astype(float32) failed with copy=False: {e}")
-        X = X.astype('float32')
-    
-    print("   Converting to numpy...")
-    X_np = X.to_numpy()
-    print(f"   Shape: {X_np.shape}")
-    print(f"   Features: {X.shape[1]}")
-    print(f"   Samples: {X.shape[0]:,}")
-    print(f"   Time: {time.time() - start_load:.1f}s")
-    
-    del X, gdf
-    gc.collect()
-    clear_gpu_memory()
-    
-    return X_np, y
+# ============================================================================
+# Calibration Classes
+# ============================================================================
 
-def objective(trial, X_train_orig, y_train_orig, X_val, y_val,
+class TemperatureScaling:
+    """Temperature scaling for calibration"""
+    def __init__(self):
+        self.temperature = 1.0
+    
+    def fit(self, logits, labels):
+        """Find optimal temperature using validation set"""
+        from scipy.optimize import minimize
+        
+        def nll_loss(temp):
+            scaled_logits = logits / temp
+            probs = 1 / (1 + np.exp(-scaled_logits))
+            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+            loss = -np.mean(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
+            return loss
+        
+        result = minimize(nll_loss, x0=1.0, bounds=[(0.1, 10.0)], method='L-BFGS-B')
+        self.temperature = result.x[0]
+    
+    def predict_proba(self, logits):
+        """Apply temperature scaling"""
+        scaled_logits = logits / self.temperature
+        probs = 1 / (1 + np.exp(-scaled_logits))
+        return probs
+
+def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
               early_stopping_rounds=20, task_type='GPU', use_mixup=True, scale_pos_weight=1.0):
-    """Optuna objective function for CatBoost (GPU-handle-safe)"""
-    # Hyperparameter space
+    """Optuna objective function for CatBoost with calibration (GPU-optimized)"""
+    
+    # 데이터 샘플링 없이 전체 사용 (파라미터 최적화로 메모리 관리)
+    X_train_sampled = X_train_orig
+    y_train_sampled = y_train_orig
+    X_val_sampled = X_val
+    y_val_sampled = y_val
+    
+    # Hyperparameter search space (전체 데이터 사용을 위한 메모리 최적화)
     params = {
         'task_type': task_type,
         'devices': '0',
         'verbose': False,
         'random_seed': 42,
         'thread_count': -1,
-        'iterations': trial.suggest_int('iterations', 50, 500),
-        'learning_rate': trial.suggest_float('learning_rate', 0.08, 0.3),
-        'depth': trial.suggest_int('depth', 3, 16),
-        'bootstrap_type': trial.suggest_categorical('bootstrap_type', ['Bayesian', 'Bernoulli']),
-        # 🔧 GPU 안정화 파라미터
+        'iterations': trial.suggest_int('iterations', 100, 500),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+        # GPU 메모리 최적화: depth를 낮게 유지 (메모리에 가장 큰 영향)
+        'depth': trial.suggest_int('depth', 4, 6),
+        # Bootstrap type
+        'bootstrap_type': 'Bernoulli',
+        'subsample': trial.suggest_float('subsample', 0.5, 1.0),  # 트리당 샘플링
+        
+        # 🔧 GPU 메모리 최적화 파라미터 (전체 데이터용)
         'allow_writing_files': False,
-        'gpu_ram_part': 0.85,
-        'used_ram_limit': '8gb',
+        'border_count': 64,  # feature binning 줄임 (기본 254 → 64로 메모리 절약)
+        'max_ctr_complexity': 2,  # CTR 복잡도 제한
+        
+        # GPU 설정
+        'gpu_ram_part': 0.95,  # 전체 데이터이므로 GPU RAM 충분히 사용
+        'pinned_memory_size': '4gb',
+        'gpu_cat_features_storage': 'CpuPinnedMemory',  # 안정성을 위해 CPU 메모리 사용
+        
         'logging_level': 'Silent',
     }
-    # GPU에서는 colsample_bylevel 대신 다른 방법 사용
-    if task_type == 'GPU':image.png
-        # GPU에서는 rsm 파라미터 사용 (pairwise 모드에서만 지원되므로 주의)
-        params['rsm'] = trial.suggest_float('rsm', 0.5, 1)
-    else:
-        # CPU에서는 기존 방식 사용
-        params['colsample_bylevel'] = trial.suggest_float('colsample_bylevel', 0.5, 1)
-
-    # Class imbalance handling
-    params['auto_class_weights'] = 'Balanced'
     
-    # MixUp
+    # GPU에서는 colsample_bylevel(rsm)이 지원되지 않음 (pairwise 모드만 지원)
+    # CPU에서만 colsample_bylevel 사용
+    if task_type == 'CPU':
+        params['colsample_bylevel'] = trial.suggest_float('colsample_bylevel', 0.5, 1.0)
+    
+    # Calibration method
+    calibration_method = trial.suggest_categorical('calibration_method', ['none', 'temperature', 'sigmoid'])
+    
+    # MixUp hyperparameters (if enabled)
+    # GPU 메모리 고려: mixup_ratio를 낮게 유지 (데이터 증가 제한)
     if use_mixup:
         mixup_alpha = trial.suggest_float('mixup_alpha', 0.01, 0.3)
-        mixup_ratio = trial.suggest_float('mixup_ratio', 0.3, 0.7, step=0.1)
+        mixup_ratio = trial.suggest_float('mixup_ratio', 0.1, 0.3, step=0.1)  # 0.3~0.7 → 0.1~0.3로 낮춤
+        
+        # Apply MixUp (샘플링된 데이터 사용)
         class_weight = (1.0, scale_pos_weight)
         X_train, y_train, sample_weight = apply_mixup_to_dataset(
-            X_train_orig, y_train_orig,
+            X_train_sampled, y_train_sampled,
             class_weight=class_weight,
             alpha=mixup_alpha,
             ratio=mixup_ratio,
             rng=np.random.default_rng(42)
         )
     else:
-        X_train = X_train_orig
-        y_train = y_train_orig
+        X_train = X_train_sampled
+        y_train = y_train_sampled
         sample_weight = None
     
+    # Train model
     params = sanitize_logging(params)
     model = cb.CatBoostClassifier(**params)
 
@@ -319,61 +201,125 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val,
             model.fit(
                 X_train, y_train,
                 sample_weight=sample_weight,
-                eval_set=(X_val, y_val),
+                eval_set=(X_val_sampled, y_val_sampled),
                 early_stopping_rounds=early_stopping_rounds,
                 verbose=False
             )
         else:
             model.fit(
                 X_train, y_train,
-                eval_set=(X_val, y_val),
+                eval_set=(X_val_sampled, y_val_sampled),
                 early_stopping_rounds=early_stopping_rounds,
                 verbose=False
             )
-        y_pred = model.predict_proba(X_val)[:, 1]
-        score, _, _ = calculate_competition_score(y_val, y_pred)
+        
+        # Get predictions on validation set
+        y_pred_val = model.predict_proba(X_val_sampled)[:, 1]
+        
+        # Apply calibration if needed
+        if calibration_method != 'none':
+            # Get predictions on calibration data (train_c)
+            y_pred_cal = model.predict_proba(X_cal)[:, 1]
+            
+            # Balance calibration data: downsample negatives to match positives
+            pos_idx = np.where(y_cal == 1)[0]
+            neg_idx = np.where(y_cal == 0)[0]
+            n_pos = len(pos_idx)
+            
+            # Randomly sample negatives to match positive count
+            rng = np.random.default_rng(42)
+            neg_sampled_idx = rng.choice(neg_idx, size=min(n_pos, len(neg_idx)), replace=False)
+            
+            # Combine indices
+            balanced_idx = np.concatenate([pos_idx, neg_sampled_idx])
+            rng.shuffle(balanced_idx)
+            
+            # Create balanced calibration set
+            y_pred_cal_balanced = y_pred_cal[balanced_idx]
+            y_cal_balanced = y_cal[balanced_idx]
+            
+            if calibration_method == 'temperature':
+                # Convert probabilities to logits
+                y_pred_cal_clipped = np.clip(y_pred_cal_balanced, 1e-7, 1 - 1e-7)
+                logits_cal = np.log(y_pred_cal_clipped / (1 - y_pred_cal_clipped))
+                
+                # Fit temperature scaling on balanced train_c
+                calibrator = TemperatureScaling()
+                calibrator.fit(logits_cal, y_cal_balanced)
+                
+                # Apply to validation set
+                y_pred_val_clipped = np.clip(y_pred_val, 1e-7, 1 - 1e-7)
+                logits_val = np.log(y_pred_val_clipped / (1 - y_pred_val_clipped))
+                y_pred_calibrated = calibrator.predict_proba(logits_val)
+                
+            else:  # sigmoid
+                # Fit logistic regression on balanced train_c
+                calibrator = LogisticRegression()
+                calibrator.fit(y_pred_cal_balanced.reshape(-1, 1), y_cal_balanced)
+                
+                # Apply to validation set
+                y_pred_calibrated = calibrator.predict_proba(y_pred_val.reshape(-1, 1))[:, 1]
+            
+            # Calculate score on validation set with calibration
+            score, _, _ = calculate_competition_score(y_val_sampled, y_pred_calibrated)
+            
+            del calibrator
+        else:
+            # No calibration - use validation set predictions directly
+            score, _, _ = calculate_competition_score(y_val_sampled, y_pred_val)
+        
     except Exception as e:
-        # GPU 핸들 오류 등 발생 시: 컨텍스트 정리 후 trial 낮은 점수 반환/Prune
+        # GPU 핸들 오류 등 발생 시: 컨텍스트 정리 후 trial 낮은 점수 반환
         print(f"❌ Trial failed with exception: {e}")
-        score = 0.0  # 또는: raise optuna.TrialPruned()
+        score = 0.0
     finally:
         # Cleanup & 강제 리셋
         del model
         gc.collect()
-        clear_gpu_memory()
+        clear_catboost_gpu_memory()
 
     return score
 
-def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0, 
+def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
                      early_stopping_rounds=20, timeout=None, task_type='GPU', use_mixup=True):
-    """Run Optuna optimization (GPU-handle-safe)"""
+    """Run Optuna optimization using pre-processed data (GPU-handle-safe)"""
     print("\n" + "="*70)
     print("🔍 CatBoost Hyperparameter Optimization with Optuna")
     print("="*70)
     print(f"   MixUp enabled: {use_mixup}")
     
-    # Load data
-    X_np, y = load_processed_data(data_path, subsample_ratio)
+    # Load train_t (training data, drop seq for GBDT)
+    print(f"\n📦 Loading training data from {train_t_path}...")
+    X_train, y_train = load_processed_data_gbdt(train_t_path, drop_seq=True)
     
-    # Split
-    print(f"\n📊 Splitting data (val_ratio={val_ratio})...")
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_np, y, test_size=val_ratio, random_state=42, stratify=y
-    )
+    # Load train_v (validation data, drop seq for GBDT)
+    print(f"\n📦 Loading validation data from {train_v_path}...")
+    X_val, y_val = load_processed_data_gbdt(train_v_path, drop_seq=True)
+    
+    # Load train_c (calibration data, drop seq for GBDT)
+    print(f"\n📦 Loading calibration data from {train_c_path}...")
+    X_cal, y_cal = load_processed_data_gbdt(train_c_path, drop_seq=True)
     
     # scale_pos_weight
     pos_ratio = y_train.mean()
     scale_pos_weight = (1 - pos_ratio) / pos_ratio
     
+    # Calculate balanced calibration set info
+    n_cal_pos = int(y_cal.sum())
+    n_cal_neg = len(y_cal) - n_cal_pos
+    n_cal_balanced = min(n_cal_pos, n_cal_neg) * 2
+    
     print(f"\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
     print(f"   Task type: {task_type}")
-    print(f"   Total samples: {len(X_np):,}")
     print(f"   Train samples: {len(X_train):,}")
     print(f"   Val samples: {len(X_val):,}")
-    print(f"   Features: {X_np.shape[1]}")
+    print(f"   Cal samples (original): {len(X_cal):,} (pos: {n_cal_pos:,}, neg: {n_cal_neg:,})")
+    print(f"   Cal samples (balanced): {n_cal_balanced:,}")
+    print(f"   Features: {X_train.shape[1]}")
     print(f"   Train positive ratio: {y_train.mean():.4f}")
     print(f"   Val positive ratio: {y_val.mean():.4f}")
+    print(f"   Cal positive ratio (original): {y_cal.mean():.4f}")
     print(f"   Scale pos weight: {scale_pos_weight:.2f}")
     print(f"   Timeout: {timeout if timeout else 'None'}")
     
@@ -390,7 +336,7 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0
     # Optimize (trial마다 GC 강제)
     study.optimize(
         lambda trial: objective(
-            trial, X_train, y_train, X_val, y_val,
+            trial, X_train, y_train, X_val, y_val, X_cal, y_cal,
             early_stopping_rounds, task_type, use_mixup, scale_pos_weight
         ),
         n_trials=n_trials,
@@ -413,7 +359,8 @@ def run_optimization(data_path, n_trials=100, val_ratio=0.2, subsample_ratio=1.0
     for key, value in study.best_params.items():
         print(f"   {key}: {value}")
     
-    del X_np, y, X_train, X_val, y_train, y_val
+    # Cleanup
+    del X_train, X_val, X_cal, y_train, y_val, y_cal
     clear_gpu_memory()
     
     return study
@@ -443,37 +390,29 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
     config['catboost']['thread_count'] = -1
     config['catboost']['random_state'] = 42
     
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path.replace('.yaml', '_catboost_best.yaml'), 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     print(f"   ✅ Saved to {output_path}")
-    
-    best_params_path = output_path.replace('.yaml', '_catboost_best.yaml')
-    with open(best_params_path, 'w', encoding='utf-8') as f:
-        yaml.dump({
-            'best_score': float(study.best_value),
-            'best_params': {k: float(v) if isinstance(v, (int, float)) else v 
-                           for k, v in best_params.items()}
-        }, f, default_flow_style=False)
-    print(f"   ✅ Best params saved to {best_params_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='CatBoost Hyperparameter Optimization')
-    parser.add_argument('--data-path', type=str, required=True,
-                        help='Path to processed data directory or raw parquet file')
+    
+    parser.add_argument('--train-t-path', type=str, default='data/proc_train_hpo',
+                        help='Path to training data (default: data/proc_train_hpo)')
+    parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
+                        help='Path to validation data (default: data/proc_train_v)')
+    parser.add_argument('--train-c-path', type=str, default='data/proc_train_c',
+                        help='Path to calibration data (default: data/proc_train_c)')
     parser.add_argument('--n-trials', type=int, default=100,
                         help='Number of optimization trials (default: 100)')
-    parser.add_argument('--val-ratio', type=float, default=0.2,
-                        help='Validation split ratio (default: 0.2)')
-    parser.add_argument('--subsample-ratio', type=float, default=1.0,
-                        help='Ratio of data to use (default: 1.0 = use all)')
     parser.add_argument('--early-stopping-rounds', type=int, default=20,
                         help='Early stopping rounds (default: 20)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--task-type', type=str, default='GPU', choices=['GPU', 'CPU'],
                         help='Task type for CatBoost (default: GPU)')
-    parser.add_argument('--use-mixup', action='store_true', default=True,
-                        help='Enable MixUp data augmentation (default: True)')
+    parser.add_argument('--use-mixup', action='store_true', default=False,
+                        help='Enable MixUp data augmentation (default: False, GPU 메모리 절약)')
     parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
                         help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
@@ -484,10 +423,10 @@ def main():
     args = parser.parse_args()
     
     print(f"\n🔧 HPO Configuration:")
-    print(f"   Data path: {args.data_path}")
+    print(f"   Train data: {args.train_t_path}")
+    print(f"   Val data: {args.train_v_path}")
+    print(f"   Cal data: {args.train_c_path}")
     print(f"   Trials: {args.n_trials}")
-    print(f"   Validation ratio: {args.val_ratio}")
-    print(f"   Subsample ratio: {args.subsample_ratio}")
     print(f"   Early stopping: {args.early_stopping_rounds}")
     print(f"   Task type: {args.task_type}")
     print(f"   Use MixUp: {args.use_mixup}")
@@ -495,10 +434,10 @@ def main():
     
     # Run optimization
     study = run_optimization(
-        data_path=args.data_path,
+        train_t_path=args.train_t_path,
+        train_v_path=args.train_v_path,
+        train_c_path=args.train_c_path,
         n_trials=args.n_trials,
-        val_ratio=args.val_ratio,
-        subsample_ratio=args.subsample_ratio,
         early_stopping_rounds=args.early_stopping_rounds,
         timeout=args.timeout,
         task_type=args.task_type,

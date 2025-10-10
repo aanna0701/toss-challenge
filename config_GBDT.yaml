@@ -18,36 +18,41 @@ model:
 
 # XGBoost configuration
 xgboost:
-  # n_estimators: 186
-  # learning_rate: 0.2511367755155965
-  # max_depth: 19
+  # n_estimators: 200
+  # early_stopping_rounds: 20
+  # max_depth: 8
+  # learning_rate: 0.1
   # subsample: 0.8
-  # colsample_bytree: 0.9963115111382519
-  # tree_method: gpu_hist
+  # colsample_bytree: 0.8
+  # scale_pos_weight: null  # Set this value during runtime
   # gpu_id: 0
   # verbosity: 0
-  # early_stopping_rounds: 20
   # seed: 42
-  # min_child_weight: 2.0
-  # gamma: 0.011655401502024312
-  # reg_alpha: 2.6271450275232193
-  # reg_lambda: 0.11457500170538186
-  # max_bin: 251
-  n_estimators: 200
+  # tree_method: gpu_hist
+  # # MixUp augmentation settings
+  # use_mixup: true
+  # mixup_alpha: 0.6
+  # mixup_ratio: 0.3
+  n_estimators: 84
   early_stopping_rounds: 20
-  max_depth: 8
-  learning_rate: 0.1
-  subsample: 0.8
-  colsample_bytree: 0.8
-  scale_pos_weight: null  # Set this value during runtime
+  max_depth: 5
+  learning_rate: 0.13066341322939076
+  subsample: 1.0
+  colsample_bytree: 0.5108367911454451
+  scale_pos_weight: null
   gpu_id: 0
   verbosity: 0
   seed: 42
   tree_method: gpu_hist
-  # MixUp augmentation settings
   use_mixup: true
-  mixup_alpha: 0.6
-  mixup_ratio: 0.3
+  mixup_alpha: 0.1
+  mixup_ratio: 0.2
+  min_child_weight: 18
+  gamma: 1.2673867800210414
+  reg_alpha: 0.2763580304884297
+  reg_lambda: 2.6758321672210155
+  max_bin: 164
+  calibration_method: sigmoid
 
 # CatBoost configuration
 catboost:

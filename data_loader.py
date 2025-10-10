@@ -5,131 +5,18 @@ import time
 
 # Third-party libraries
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import LabelEncoder
+from merlin.io import Dataset as MerlinDataset
 from torch.utils.data import Dataset
 
+# Custom modules
+from utils import clear_gpu_memory
+
 
 # ============================================================================
-# GBDT 모델용 데이터 로더 (NVTabular 사용)
+# GBDT 모델용 데이터 로더 (Pre-processed data from dataset_split_and_preprocess.py)
 # ============================================================================
-
-def create_workflow_gbdt():
-    """Create NVTabular workflow with standardization and missing value handling"""
-    import nvtabular as nvt
-    from nvtabular import ops
-    
-    print("\n🔧 Creating GBDT workflow with standardization...")
-
-    # TRUE CATEGORICAL COLUMNS (only 5)
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-
-    # CONTINUOUS COLUMNS (110 total, l_feat_20, l_feat_23 제외)
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +   # 18
-        [f'feat_b_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_c_{i}' for i in range(1, 9)] +    # 8
-        [f'feat_d_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_e_{i}' for i in range(1, 11)] +   # 10
-        [f'history_a_{i}' for i in range(1, 8)] +   # 7
-        [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25 (l_feat_20, l_feat_23 제외)
-    )
-
-    print(f"   Categorical: {len(true_categorical)} columns")
-    print(f"   Continuous: {len(all_continuous)} columns")
-    print(f"   Total features: {len(true_categorical) + len(all_continuous)}")
-
-    # Preprocessing pipeline:
-    # 1. Categorify for categorical features
-    cat_features = true_categorical >> ops.Categorify(
-        freq_threshold=0,
-        max_size=50000
-    )
-    
-    # 2. Normalize + FillMissing for continuous features
-    # - Normalize 먼저: 결측치 없는 데이터로 mean/std 계산 (실제 분포 반영)
-    # - FillMissing(0) 나중: 표준화 공간에서 0 = 평균값으로 imputation
-    cont_features = all_continuous >> ops.Normalize() >> ops.FillMissing(fill_val=0)
-
-    workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
-
-    print("   ✅ Workflow created with standardization:")
-    print("      - Categorical: Categorify")
-    print("      - Continuous: Normalize(mean=0, std=1) + FillMissing(0)")
-    print("      - 순서: Normalize 먼저 (실제 분포로 통계), 그 후 결측치=0 (평균)")
-    return workflow
-
-
-def process_data_with_nvtabular(data_path, temp_dir='tmp'):
-    """Process data with NVTabular (matching train_and_predict_GBDT.py)"""
-    import nvtabular as nvt
-    import pandas as pd
-    import pyarrow.parquet as pq
-    from merlin.io import Dataset
-    
-    from utils import clear_gpu_memory
-    
-    print("\n" + "="*70)
-    print("🚀 NVTabular Data Processing")
-    print("="*70)
-
-    # Create unique temp directory for each file
-    import os
-    file_name = os.path.basename(data_path).replace('.parquet', '')
-    unique_temp_dir = f'{temp_dir}_{file_name}'
-    os.makedirs(unique_temp_dir, exist_ok=True)
-
-    # Prepare data without 'seq' column
-    temp_path = f'{unique_temp_dir}/train_no_seq.parquet'
-    if not os.path.exists(temp_path):
-        print("\n📋 Creating temp file without 'seq' column...")
-        pf = pq.ParquetFile(data_path)
-        cols = [c for c in pf.schema.names if c not in ['seq', '']]
-        print(f"   Total columns: {len(pf.schema.names)}")
-        print(f"   Using columns: {len(cols)} (excluded 'seq')")
-
-        df = pd.read_parquet(data_path, columns=cols)
-        print(f"   Loaded {len(df):,} rows")
-        df.to_parquet(temp_path, index=False)
-        del df
-        gc.collect()
-        print("   ✅ Temp file created")
-    else:
-        print(f"✅ Using existing temp file: {temp_path}")
-
-    # Create dataset with balanced partitions
-    print("\n📦 Creating NVTabular Dataset...")
-    print("   Using 64MB partitions for better throughput vs memory")
-    clear_gpu_memory()
-
-    dataset = Dataset(
-        temp_path,
-        engine='parquet',
-        part_size='64MB'  # 32~64MB 권장
-    )
-    print("   ✅ Dataset created")
-
-    # Create and fit workflow
-    print("\n📊 Fitting workflow...")
-    workflow = create_workflow_gbdt()
-    workflow.fit(dataset)
-    print("   ✅ Workflow fitted")
-
-    # Transform and return processed data
-    print(f"\n💾 Transforming data...")
-    clear_gpu_memory()
-
-    try:
-        gdf = workflow.transform(dataset).to_ddf().compute()
-        print(f"   ✅ Data processed: {len(gdf):,} rows x {len(gdf.columns)} columns")
-        return gdf
-    except Exception as e:
-        print(f"❌ Error during processing: {e}")
-        raise
-
 
 def load_processed_data_gbdt(data_path, drop_seq=True):
     """
@@ -137,43 +24,46 @@ def load_processed_data_gbdt(data_path, drop_seq=True):
     
     Args:
         data_path: Path to processed directory (e.g., 'data/proc_train_t')
-                   또는 legacy raw parquet file
         drop_seq: If True, drop 'seq' column (for GBDT models)
     
     Returns:
         X_np: numpy array of features (float32)
         y: numpy array of labels
-    """
-    from merlin.io import Dataset
-    from utils import clear_gpu_memory
     
+    Note:
+        - 반드시 dataset_split_and_preprocess.py를 먼저 실행하여 전처리 데이터 생성 필요
+        - Categorical: 이미 Categorify로 인코딩됨 (0-based indices)
+        - Continuous: 이미 Standardization 적용됨 (mean=0, std=1)
+    """
     print(f"\n📦 Loading data from {data_path}...")
     if drop_seq:
         print("   🗑️  seq column will be dropped (GBDT mode)")
     start_load = time.time()
     
-    # Check if it's NVTabular processed data or raw parquet
-    if os.path.isdir(data_path):
-        # Pre-processed directory - load directly (FAST!)
+    # Pre-processed directory만 지원
+    if not os.path.isdir(data_path):
+        raise ValueError(
+            f"❌ {data_path}는 디렉토리가 아닙니다!\n"
+            "   dataset_split_and_preprocess.py를 먼저 실행하여 전처리 데이터를 생성하세요.\n"
+            "   예: python dataset_split_and_preprocess.py"
+        )
+    
+    # Pre-processed directory - load directly (FAST!)
+    try:
+        dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
+        print("   Converting to GPU DataFrame...")
+        gdf = dataset.to_ddf().compute()
+        print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        print("   Trying with smaller partitions...")
         try:
-            dataset = Dataset(data_path, engine='parquet', part_size='128MB')
-            print("   Converting to GPU DataFrame...")
+            dataset = MerlinDataset(data_path, engine='parquet', part_size='64MB')
             gdf = dataset.to_ddf().compute()
-            print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
-        except Exception as e:
-            print(f"❌ Error loading data: {e}")
-            print("   Trying with even smaller partitions...")
-            try:
-                dataset = Dataset(data_path, engine='parquet', part_size='64MB')
-                gdf = dataset.to_ddf().compute()
-                print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
-            except Exception as e2:
-                print(f"❌ Failed even with 64MB partitions: {e2}")
-                raise
-    else:
-        # Legacy: Raw parquet file - process with NVTabular (SLOW!)
-        print("   ⚠️  Raw parquet detected - processing on-the-fly (권장: dataset_split_and_preprocess.py 실행)")
-        gdf = process_data_with_nvtabular(data_path)
+            print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
+        except Exception as e2:
+            print(f"❌ Failed even with 64MB partitions: {e2}")
+            raise
     
     # Prepare X and y (matching train_and_predict_GBDT.py exactly)
     print("\n📊 Preparing data for GBDT...")
@@ -216,9 +106,23 @@ def load_processed_data_gbdt(data_path, drop_seq=True):
 # DNN 모델용 데이터 로더 (WideDeepCTR 등)
 # ============================================================================
 
+def load_processed_dnn_data(data_path):
+    """Load pre-processed data from dataset_split_and_preprocess.py"""
+    dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
+    gdf = dataset.to_ddf().compute()
+    df = gdf.to_pandas()
+    return df
+
 class ClickDatasetDNN(Dataset):
-    """DNN 모델용 데이터셋 (WideDeepCTR 등)"""
-    def __init__(self, df, num_cols, cat_cols, seq_col, norm_stats, target_col=None, has_target=True):
+    """DNN 모델용 데이터셋 (WideDeepCTR 등)
+    
+    Note:
+        - Data is already preprocessed by dataset_split_and_preprocess.py
+        - Categorical: already Categorify-encoded (0-based indices)
+        - Numerical: already normalized (mean=0, std=1)
+        - Missing values: already filled with 0
+    """
+    def __init__(self, df, num_cols, cat_cols, seq_col, target_col=None, has_target=True):
         self.df = df.reset_index(drop=True)
         self.num_cols = num_cols
         self.cat_cols = cat_cols
@@ -226,17 +130,8 @@ class ClickDatasetDNN(Dataset):
         self.target_col = target_col
         self.has_target = has_target
         
-        # Standardize numerical features using normalization_stats.json
-        num_data = self.df[self.num_cols].astype(float)
-        for col in self.num_cols:
-            if col in norm_stats:
-                mean = norm_stats[col]['mean']
-                std = norm_stats[col]['std']
-                # Avoid division by zero
-                if std > 0:
-                    num_data[col] = (num_data[col] - mean) / std
-        self.num_X = num_data.fillna(0).values
-        
+        # Data is already preprocessed - just convert to numpy arrays
+        self.num_X = self.df[self.num_cols].fillna(0).astype(float).values
         self.cat_X = self.df[self.cat_cols].astype(int).values
         self.seq_strings = self.df[self.seq_col].astype(str).values
         if self.has_target:
@@ -282,18 +177,3 @@ def collate_fn_dnn_infer(batch):
     seq_lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
     seq_lengths = torch.clamp(seq_lengths, min=1)
     return num_x, cat_x, seqs_padded, seq_lengths
-
-
-def encode_categoricals_dnn(train_df, test_df, cat_cols):
-    """범주형 피처 인코딩 (DNN용)"""
-    
-    encoders = {}
-    for col in cat_cols:
-        le = LabelEncoder()
-        all_values = pd.concat([train_df[col], test_df[col]], axis=0).astype(str).fillna("UNK")
-        le.fit(all_values)
-        train_df[col] = le.transform(train_df[col].astype(str).fillna("UNK"))
-        test_df[col]  = le.transform(test_df[col].astype(str).fillna("UNK"))
-        encoders[col] = le
-        print(f"{col} unique categories: {len(le.classes_)}")
-    return train_df, test_df, encoders

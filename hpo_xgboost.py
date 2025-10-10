@@ -255,27 +255,14 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal, ear
     return score
 
 def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100, 
-                     early_stopping_rounds=20, timeout=None, use_mixup=True, use_hpo_subset=True):
-    """Run Optuna optimization using pre-processed data
-    
-    Args:
-        train_t_path: Path to training data (또는 proc_train_hpo for faster HPO)
-        train_v_path: Path to validation data
-        train_c_path: Path to calibration data
-        use_hpo_subset: If True, use proc_train_hpo instead of proc_train_t for faster HPO
-    """
+                     early_stopping_rounds=20, timeout=None, use_mixup=True):
+    """Run Optuna optimization using pre-processed data"""
     print("\n" + "="*70)
     print("🔍 XGBoost Hyperparameter Optimization with Optuna")
     print("="*70)
     print(f"   MixUp enabled: {use_mixup}")
-    print(f"   HPO subset: {use_hpo_subset}")
     
-    # Use HPO subset for faster optimization
-    if use_hpo_subset and train_t_path == 'data/proc_train_t':
-        train_t_path = 'data/proc_train_hpo'
-        print(f"   ⚡ Using HPO subset for faster optimization")
-    
-    # Load train_t (training data or HPO subset, drop seq for GBDT)
+    # Load train_t (training data, drop seq for GBDT)
     print(f"\n📦 Loading training data from {train_t_path}...")
     X_train, y_train = load_processed_data_gbdt(train_t_path, drop_seq=True)
     
@@ -392,27 +379,16 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
         print(f"   Best calibration method: {best_params['calibration_method']}")
     
     # Save
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path.replace('.yaml', '_xgboost_best.yaml'), 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     
     print(f"   ✅ Saved to {output_path}")
-    
-    # Also save best params separately
-    best_params_path = output_path.replace('.yaml', '_xgboost_best.yaml')
-    with open(best_params_path, 'w', encoding='utf-8') as f:
-        yaml.dump({
-            'best_score': float(study.best_value),
-            'best_params': {k: float(v) if isinstance(v, (int, float)) else v 
-                           for k, v in best_params.items()}
-        }, f, default_flow_style=False)
-    
-    print(f"   ✅ Best params saved to {best_params_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='XGBoost Hyperparameter Optimization')
     
-    parser.add_argument('--train-t-path', type=str, default='data/proc_train_t',
-                        help='Path to training data (default: data/proc_train_t)')
+    parser.add_argument('--train-t-path', type=str, default='data/proc_train_hpo',
+                        help='Path to training data (default: data/proc_train_hpo)')
     parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
                         help='Path to validation data (default: data/proc_train_v)')
     parser.add_argument('--train-c-path', type=str, default='data/proc_train_c',
@@ -427,10 +403,6 @@ def main():
                         help='Enable MixUp data augmentation (default: True)')
     parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
                         help='Disable MixUp data augmentation')
-    parser.add_argument('--use-hpo-subset', action='store_true', default=True,
-                        help='Use proc_train_hpo subset for faster HPO (default: True)')
-    parser.add_argument('--no-hpo-subset', dest='use_hpo_subset', action='store_false',
-                        help='Use full proc_train_t instead of HPO subset')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
                         help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',
@@ -445,7 +417,6 @@ def main():
     print(f"   Trials: {args.n_trials}")
     print(f"   Early stopping: {args.early_stopping_rounds}")
     print(f"   Use MixUp: {args.use_mixup}")
-    print(f"   Use HPO subset: {args.use_hpo_subset}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
     else:
@@ -459,8 +430,7 @@ def main():
         n_trials=args.n_trials,
         early_stopping_rounds=args.early_stopping_rounds,
         timeout=args.timeout,
-        use_mixup=args.use_mixup,
-        use_hpo_subset=args.use_hpo_subset
+        use_mixup=args.use_mixup
     )
     
     # Save results

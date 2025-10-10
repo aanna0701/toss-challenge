@@ -20,15 +20,15 @@ Pipeline:
 - seq: 시퀀스 데이터 (DNN용, GBDT는 로더에서 제거)
 
 Features:
-- 4 categorical features (gender, age_group, inventory_id, l_feat_14)
-  → raw 유지 (DNN 자체 LabelEncoder 사용)
-- 110 continuous features
+- 3 categorical features (gender, age_group, inventory_id)
+  → Categorify 적용 (결측치 자동 처리, 인덱스 인코딩)
+- 112 continuous features (l_feat_14 포함)
   → Normalize(mean=0, std=1) + FillMissing(0) 적용 (순서 중요!)
 - seq: string (LSTM 입력)
-- Total: 4 categorical + 110 continuous + seq + clicked (target)
+- Total: 3 categorical + 112 continuous + seq + clicked (target)
 
 전처리 상세:
-- Categorical: raw 유지 (DNN에서 LabelEncoder 사용)
+- Categorical: Categorify (결측치 자동 처리, 0-based 인덱스 인코딩)
 - Continuous: 
   1. Normalize: Standardization (mean=0, std=1) 먼저 수행
      - 결측치 없는 실제 데이터로 mean/std 계산
@@ -72,53 +72,6 @@ import pandas as pd
 from datetime import datetime
 from sklearn.model_selection import train_test_split
 
-def create_workflow_gbdt():
-    """Create NVTabular workflow for GBDT (seq 제거, standardization 적용)"""
-    import nvtabular as nvt
-    from nvtabular import ops
-    
-    print("\n🔧 Creating GBDT workflow with standardization...")
-
-    # TRUE CATEGORICAL COLUMNS (only 5)
-    true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
-
-    # CONTINUOUS COLUMNS (110 total, l_feat_20, l_feat_23 제외)
-    all_continuous = (
-        [f'feat_a_{i}' for i in range(1, 19)] +   # 18
-        [f'feat_b_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_c_{i}' for i in range(1, 9)] +    # 8
-        [f'feat_d_{i}' for i in range(1, 7)] +    # 6
-        [f'feat_e_{i}' for i in range(1, 11)] +   # 10
-        [f'history_a_{i}' for i in range(1, 8)] +   # 7
-        [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25 (l_feat_20, l_feat_23 제외)
-    )
-
-    print(f"   Categorical: {len(true_categorical)} columns")
-    print(f"   Continuous: {len(all_continuous)} columns")
-    print(f"   Total features: {len(true_categorical) + len(all_continuous)}")
-
-    # Preprocessing pipeline:
-    # 1. Categorify for categorical features
-    cat_features = true_categorical >> ops.Categorify(
-        freq_threshold=0,
-        max_size=50000
-    )
-    
-    # 2. Normalize + FillMissing for continuous features
-    # - Normalize 먼저: 결측치 없는 데이터로 mean/std 계산 (실제 분포 반영)
-    # - FillMissing(0) 나중: 표준화 공간에서 0 = 평균값으로 imputation
-    cont_features = all_continuous >> ops.Normalize() >> ops.FillMissing(fill_val=0)
-
-    workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
-
-    print("   ✅ Workflow created with standardization:")
-    print("      - Categorical: Categorify")
-    print("      - Continuous: Normalize(mean=0, std=1) + FillMissing(0)")
-    print("      - 순서: Normalize 먼저 (실제 분포로 통계), 그 후 결측치=0 (평균)")
-    return workflow
-
-
 def fill_missing_seq(df, seq_col='seq', fill_value='0.0'):
     """
     seq 컬럼의 결측치 처리
@@ -141,17 +94,15 @@ def fill_missing_seq(df, seq_col='seq', fill_value='0.0'):
     return df
 
 
-def create_workflow_dnn():
-    """Create NVTabular workflow for DNN (seq 포함, continuous만 standardization)"""
+def create_workflow_common():
+    """Create NVTabular workflow (seq 제외 - cudf string limit 회피)"""
     import nvtabular as nvt
     from nvtabular import ops
     
-    print("\n🔧 Creating DNN workflow with standardization (seq 포함)...")
+    print("\n🔧 Creating common workflow (seq 제외)...")
 
-    # DNN은 categorical을 자체 LabelEncoder로 처리하므로 raw로 유지
-    # seq는 별도로 standardization 적용 (workflow 외부)
-    
-    # CONTINUOUS COLUMNS (110 total, l_feat_20, l_feat_23 제외)
+    # CONTINUOUS COLUMNS (112 total, l_feat_20, l_feat_23 제외)
+    # l_feat_14는 continuous (float 값 존재 확인됨)
     all_continuous = (
         [f'feat_a_{i}' for i in range(1, 19)] +   # 18
         [f'feat_b_{i}' for i in range(1, 7)] +    # 6
@@ -160,32 +111,35 @@ def create_workflow_dnn():
         [f'feat_e_{i}' for i in range(1, 11)] +   # 10
         [f'history_a_{i}' for i in range(1, 8)] +   # 7
         [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25 (l_feat_20, l_feat_23 제외)
+        [f'l_feat_{i}' for i in range(1, 28) if i not in [20, 23]]  # 25 (l_feat_14 포함!)
     )
     
-    # CATEGORICAL COLUMNS (DNN에서 사용하는 것들 - raw로 유지)
-    categorical_raw = ['gender', 'age_group', 'inventory_id', 'l_feat_14']
+    # CATEGORICAL COLUMNS (Categorify 적용 - 결측치 자동 처리, 인덱스 인코딩)
+    # l_feat_14는 제외 (float 값 존재하여 continuous로 처리)
+    categorical_cols = ['gender', 'age_group', 'inventory_id']
     
-    print(f"   Categorical (raw): {len(categorical_raw)} columns (DNN 코드에서 LabelEncoder)")
-    print(f"   Continuous: {len(all_continuous)} columns (standardization 적용)")
-    print(f"   seq: 결측치 처리만 적용 (workflow 외부)")
+    print(f"   Categorical: {len(categorical_cols)} columns")
+    print(f"   Continuous: {len(all_continuous)} columns")
+    print(f"   ⚠️  seq: workflow 제외 (cudf string limit 회피, 나중에 병합)")
 
     # Preprocessing pipeline:
-    # 1. Categorical: raw로 유지 (DNN 코드에서 LabelEncoder 사용)
-    cat_features = categorical_raw
+    # 1. Categorical: Categorify 적용 (결측치 자동 처리, 인덱스 인코딩)
+    cat_features = categorical_cols >> ops.Categorify(
+        freq_threshold=0,
+        max_size=50000
+    )
     
     # 2. Normalize + FillMissing for continuous features
     cont_features = all_continuous >> ops.Normalize() >> ops.FillMissing(fill_val=0)
-    
-    # 3. seq는 그대로 유지 (별도 처리)
-    seq_feature = ['seq']
 
-    workflow = nvt.Workflow(cat_features + cont_features + seq_feature + ['clicked'])
+    # 3. _row_id는 그대로 유지 (순서 보장용)
+    workflow = nvt.Workflow(cat_features + cont_features + ['clicked', '_row_id'])
 
-    print("   ✅ Workflow created:")
-    print("      - Categorical: raw 유지 (DNN 코드에서 LabelEncoder)")
-    print("      - Continuous: Normalize(mean=0, std=1) + FillMissing(0)")
-    print("      - seq: 결측치 처리만 적용 (workflow 외부)")
+    print("   ✅ Workflow created (seq 제외):")
+    print("      - Categorical: Categorify (결측치 자동 처리, 인덱스 인코딩)")
+    print("      - Continuous: Normalize + FillMissing(0)")
+    print("      - _row_id: passthrough (순서 보장)")
+    print("      - seq: transform 후 원본 병합")
     return workflow
 
 
@@ -320,22 +274,37 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     }
     
     temp_files = {}
+    seq_files = {}  # seq를 별도로 저장
+    
     for name, df in splits.items():
         # 불필요한 컬럼 제거
         cols_to_keep = [c for c in df.columns if c not in EXCLUDE_COLS]
         df_clean = df[cols_to_keep].copy()
         
+        # ✅ 순서 보장을 위해 임시 row_id 추가
+        df_clean['_row_id'] = range(len(df_clean))
+        
         # seq 결측치 처리
         if 'seq' in df_clean.columns:
             df_clean = fill_missing_seq(df_clean, seq_col='seq', fill_value='0.0')
+            
+            # seq를 row_id와 함께 별도 파일로 저장
+            seq_path = os.path.join(output_dirs['temp'], f'{name}_seq.parquet')
+            df_clean[['_row_id', 'seq']].to_parquet(seq_path, index=False)
+            seq_files[name] = seq_path
+            
+            # workflow용 데이터에서 seq 제거 (row_id는 유지)
+            df_no_seq = df_clean.drop('seq', axis=1)
+        else:
+            df_no_seq = df_clean
         
-        # 임시 파일로 저장
+        # 임시 파일로 저장 (seq 제외, row_id 포함)
         temp_path = os.path.join(output_dirs['temp'], f'{name}.parquet')
-        df_clean.to_parquet(temp_path, index=False)
+        df_no_seq.to_parquet(temp_path, index=False)
         temp_files[name] = temp_path
-        print(f"  ✅ {name}: {len(df_clean):,} rows, {len(df_clean.columns)} cols → {temp_path}")
+        print(f"  ✅ {name}: {len(df_no_seq):,} rows, {len(df_no_seq.columns)} cols (seq 별도 저장, row_id 추가)")
         
-        del df_clean
+        del df_clean, df_no_seq
     
     # 메모리 정리 (df_full은 이미 사용 완료)
     del df_full, df_train_t, df_train_v, df_train_c, df_train_hpo, splits
@@ -377,10 +346,10 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     
     train_dataset = Dataset(temp_files['train_t'], engine='parquet', part_size='128MB')
     
-    workflow = create_workflow_dnn()
+    workflow = create_workflow_common()
     
     # Fit with memory cleanup
-    print("   🔧 Fitting workflow on train_t...")
+    print("   🔧 Fitting workflow on train_t (seq 제외)...")
     workflow.fit(train_dataset)
     print("  ✅ Workflow fitted on train_t only (val/cal/test는 transform만)")
     
@@ -398,10 +367,10 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
         pass
     
     # =================================================================
-    # Step 4: Transform 각 split (동일한 workflow 사용)
+    # Step 4: Transform 각 split + seq 병합
     # =================================================================
     print("\n" + "=" * 80)
-    print("⚙️  Step 4: Transform 각 split (동일한 통계 적용)")
+    print("⚙️  Step 4: Transform 각 split + seq 병합")
     print("=" * 80)
     
     # Transform 순서: train_t, train_v, train_c, train_hpo
@@ -413,14 +382,16 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
         # Dataset 생성 (큰 파티션으로 메모리 효율 개선)
         dataset = Dataset(temp_files[split_name], engine='parquet', part_size='128MB')
         
-        # Transform
-        output_dir = output_dirs[split_name]
+        # Transform (seq 제외)
+        temp_output_dir = os.path.join(output_dirs['temp'], f'{split_name}_transformed')
+        os.makedirs(temp_output_dir, exist_ok=True)
+        
         workflow.transform(dataset).to_parquet(
-            output_path=output_dir,
+            output_path=temp_output_dir,
             shuffle=None,
-            out_files_per_proc=4  # 파일 수 줄여서 메모리 절약
+            out_files_per_proc=4
         )
-        print(f"  ✅ {split_name} transformed → {output_dir}")
+        print(f"  ✅ {split_name} transformed (seq 제외)")
         
         del dataset
         gc.collect()
@@ -431,6 +402,58 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
             cp.get_default_pinned_memory_pool().free_all_blocks()
         except:
             pass
+        
+        # seq 병합 (pandas로 처리 - row_id로 순서 보장)
+        print(f"  🔗 Merging seq back (using row_id for order preservation)...")
+        from merlin.io import Dataset as MerlinDataset
+        
+        # Transform된 데이터 로드
+        dataset_transformed = MerlinDataset(temp_output_dir, engine='parquet')
+        df_transformed = dataset_transformed.to_ddf().compute().to_pandas()
+        
+        # 원본 seq 로드 및 병합
+        if split_name in seq_files:
+            df_seq = pd.read_parquet(seq_files[split_name])
+            
+            # row_id로 정렬 (순서 보장)
+            df_transformed = df_transformed.sort_values('_row_id').reset_index(drop=True)
+            df_seq = df_seq.sort_values('_row_id').reset_index(drop=True)
+            
+            # 순서 검증
+            assert len(df_transformed) == len(df_seq), f"Length mismatch: {len(df_transformed)} vs {len(df_seq)}"
+            assert (df_transformed['_row_id'].values == df_seq['_row_id'].values).all(), "row_id mismatch!"
+            
+            # seq 병합 (row_id 기준으로 정렬되었으므로 안전)
+            df_final = df_transformed.copy()
+            df_final['seq'] = df_seq['seq'].values  # numpy array로 직접 할당 (순서 보장)
+            
+            # row_id 제거
+            df_final = df_final.drop('_row_id', axis=1)
+            
+            print(f"  ✅ seq merged: {len(df_final)} rows, {len(df_final.columns)} cols (row_id removed)")
+        else:
+            df_final = df_transformed.drop('_row_id', axis=1) if '_row_id' in df_transformed.columns else df_transformed
+            print(f"  ⚠️  No seq found for {split_name}")
+        
+        # 최종 저장
+        output_dir = output_dirs[split_name]
+        os.makedirs(output_dir, exist_ok=True)
+        df_final.to_parquet(
+            os.path.join(output_dir, '0.parquet'),
+            index=False,
+            engine='pyarrow'
+        )
+        print(f"  ✅ Saved to {output_dir}")
+        
+        # 정리
+        del df_transformed, df_final
+        if split_name in seq_files:
+            del df_seq
+        gc.collect()
+        
+        # 임시 변환 디렉토리 삭제
+        shutil.rmtree(temp_output_dir)
+        print(f"  🧹 Cleaned temp: {temp_output_dir}")
     
     # =================================================================
     # Step 5: Test 데이터 전처리
@@ -449,35 +472,50 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
         cols_to_keep = [c for c in df_test.columns if c not in EXCLUDE_COLS]
         df_test_clean = df_test[cols_to_keep].copy()
         print(f"  🗑️  제외 컬럼: {[c for c in EXCLUDE_COLS if c in df_test.columns]}")
-        print(f"  ✅ seq 유지")
-        print(f"  📊 남은 컬럼: {len(df_test_clean.columns)} columns")
+        
+        # ✅ 순서 보장을 위해 임시 row_id 추가
+        df_test_clean['_row_id'] = range(len(df_test_clean))
         
         # seq 결측치 처리
         if 'seq' in df_test_clean.columns:
             df_test_clean = fill_missing_seq(df_test_clean, seq_col='seq', fill_value='0.0')
+            
+            # seq를 row_id와 함께 별도 파일로 저장
+            test_seq_path = os.path.join(output_dirs['temp'], 'test_seq.parquet')
+            df_test_clean[['_row_id', 'seq']].to_parquet(test_seq_path, index=False)
+            
+            # workflow용 데이터에서 seq 제거 (row_id는 유지)
+            df_test_no_seq = df_test_clean.drop('seq', axis=1)
+        else:
+            df_test_no_seq = df_test_clean
+            test_seq_path = None
         
         # clicked 컬럼 추가 (dummy, NVTabular workflow 호환용)
-        if 'clicked' not in df_test_clean.columns:
-            df_test_clean['clicked'] = 0
+        if 'clicked' not in df_test_no_seq.columns:
+            df_test_no_seq['clicked'] = 0
             print("  ⚠️  Test에 'clicked' 컬럼 추가 (dummy)")
         
-        # 임시 저장
+        # 임시 저장 (seq 제외, row_id 포함)
         test_temp_path = os.path.join(output_dirs['temp'], 'test.parquet')
-        df_test_clean.to_parquet(test_temp_path, index=False)
+        df_test_no_seq.to_parquet(test_temp_path, index=False)
+        print(f"  ✅ Test 준비 완료 (seq 별도 저장, row_id 추가)")
         
-        del df_test, df_test_clean
+        del df_test, df_test_clean, df_test_no_seq
         gc.collect()
         
-        # Transform (공통 전처리)
-        print(f"\n🔄 Processing proc_test...")
+        # Transform (seq 제외)
+        print(f"\n🔄 Processing test (seq 제외)...")
         test_dataset = Dataset(test_temp_path, engine='parquet', part_size='128MB')
+        
+        temp_test_output_dir = os.path.join(output_dirs['temp'], 'test_transformed')
+        os.makedirs(temp_test_output_dir, exist_ok=True)
+        
         workflow.transform(test_dataset).to_parquet(
-            output_path=output_dirs['test'],
+            output_path=temp_test_output_dir,
             shuffle=None,
-            out_files_per_proc=4  # 파일 수 줄여서 메모리 절약
+            out_files_per_proc=4
         )
-        print(f"  ✅ test transformed → {output_dirs['test']}")
-        print(f"     (GBDT: seq 제거해서 사용, DNN: seq 포함 사용)")
+        print(f"  ✅ test transformed (seq 제외)")
         
         del test_dataset
         gc.collect()
@@ -488,6 +526,62 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
             cp.get_default_pinned_memory_pool().free_all_blocks()
         except:
             pass
+        
+        # seq 병합 (pandas로 처리 - row_id로 순서 보장)
+        if test_seq_path:
+            print(f"  🔗 Merging seq back to test...")
+            from merlin.io import Dataset as MerlinDataset
+            
+            # Transform된 데이터 로드
+            dataset_transformed = MerlinDataset(temp_test_output_dir, engine='parquet')
+            df_test_transformed = dataset_transformed.to_ddf().compute().to_pandas()
+            
+            # 원본 seq 로드
+            df_test_seq = pd.read_parquet(test_seq_path)
+            
+            # row_id로 정렬 (순서 보장)
+            df_test_transformed = df_test_transformed.sort_values('_row_id').reset_index(drop=True)
+            df_test_seq = df_test_seq.sort_values('_row_id').reset_index(drop=True)
+            
+            # 순서 검증
+            assert len(df_test_transformed) == len(df_test_seq), f"Length mismatch: {len(df_test_transformed)} vs {len(df_test_seq)}"
+            assert (df_test_transformed['_row_id'].values == df_test_seq['_row_id'].values).all(), "row_id mismatch!"
+            
+            # seq 병합
+            df_test_final = df_test_transformed.copy()
+            df_test_final['seq'] = df_test_seq['seq'].values
+            
+            # row_id 제거
+            df_test_final = df_test_final.drop('_row_id', axis=1)
+            
+            print(f"  ✅ seq merged: {len(df_test_final)} rows, {len(df_test_final.columns)} cols")
+        else:
+            # seq가 없는 경우
+            from merlin.io import Dataset as MerlinDataset
+            dataset_transformed = MerlinDataset(temp_test_output_dir, engine='parquet')
+            df_test_final = dataset_transformed.to_ddf().compute().to_pandas()
+            df_test_final = df_test_final.drop('_row_id', axis=1) if '_row_id' in df_test_final.columns else df_test_final
+        
+        # 최종 저장
+        output_dir = output_dirs['test']
+        os.makedirs(output_dir, exist_ok=True)
+        df_test_final.to_parquet(
+            os.path.join(output_dir, '0.parquet'),
+            index=False,
+            engine='pyarrow'
+        )
+        print(f"  ✅ Test saved to {output_dir}")
+        print(f"     (GBDT: seq 제거해서 사용, DNN: seq 포함 사용)")
+        
+        # 정리
+        del df_test_final
+        if test_seq_path:
+            del df_test_transformed, df_test_seq
+        gc.collect()
+        
+        # 임시 변환 디렉토리 삭제
+        shutil.rmtree(temp_test_output_dir)
+        print(f"  🧹 Cleaned temp: {temp_test_output_dir}")
     else:
         print(f"\n⚠️  {test_path} 파일이 없습니다. Test 전처리를 건너뜁니다.")
     
@@ -527,8 +621,10 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print(f"  - l_feat_20, l_feat_23 제거 (상수 피처)")
     print(f"  ⚠️  중요: train_t로만 workflow fit (Data Leakage 방지!)")
     print(f"    * val/cal/test는 train_t 통계로 transform만 수행")
-    print(f"  - Categorical: raw 유지 (DNN 자체 LabelEncoder 사용)")
-    print(f"  - Continuous: Normalize → FillMissing(0) (110개 피처)")
+    print(f"  - Categorical: 3개 (gender, age_group, inventory_id)")
+    print(f"    * Categorify: 결측치 자동 처리, 0-based 인덱스")
+    print(f"  - Continuous: 112개 (l_feat_14 포함)")
+    print(f"    * Normalize → FillMissing(0)")
     print(f"    * Normalize 먼저: train_t의 실제 분포로 mean/std 계산")
     print(f"    * FillMissing(0) 나중: 표준화 공간에서 평균값으로 imputation")
     print(f"  - Normalization: Standardization (mean=0, std=1)")
@@ -539,6 +635,7 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print("  from data_loader import load_processed_data_gbdt")
     print("  X, y = load_processed_data_gbdt('data/proc_train_t', drop_seq=True)")
     print("  # ✅ seq 제거")
+    print("  # ✅ categorical은 이미 인덱스 인코딩됨 (0-based)")
     print("  # ✅ continuous는 이미 standardization 적용됨 (mean=0, std=1)")
     print()
     print("  [DNN 모델 - train_dnn_ddp.py, hpo_dnn.py]")
@@ -548,8 +645,8 @@ def process_all_data(train_ratio=0.8, val_ratio=0.1, cal_ratio=0.1,
     print("  df = gdf.to_pandas()  # seq 포함")
     print("  # ✅ l_feat_20, l_feat_23 이미 제거됨")
     print("  # ✅ seq 결측치 이미 처리됨 (빈값 → '0.0')")
+    print("  # ✅ categorical은 이미 인덱스 인코딩됨 (0-based)")
     print("  # ✅ continuous는 이미 standardization 적용됨")
-    print("  # ⚠️  Categorical encoding은 DNN 코드에서 LabelEncoder 사용")
     
     print("\n" + "=" * 80)
 

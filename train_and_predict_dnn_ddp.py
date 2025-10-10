@@ -129,7 +129,8 @@ seq_col = "seq"
 FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
 feature_cols = [c for c in train.columns if c not in FEATURE_EXCLUDE]
 
-cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
+# Categorical columns (based on analysis/results/feature_classification.json)
+cat_cols = ["gender", "age_group", "inventory_id"]
 num_cols = [c for c in feature_cols if c not in cat_cols]
 fabric.print(f"Num features: {len(num_cols)} | Cat features: {len(cat_cols)}")
 

@@ -3,27 +3,21 @@ import argparse
 import csv
 import json
 import os
-import pickle
 from datetime import datetime
 
 # Third-party libraries
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
 from lightning.fabric import Fabric
-from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Custom modules
-from data_loader import ClickDatasetDNN, collate_fn_dnn_train
+from data_loader import ClickDatasetDNN, collate_fn_dnn_train, load_processed_dnn_data
 from mixup import mixup_batch_torch
 from utils import calculate_competition_score, seed_everything
-
-# Set CUDA_VISIBLE_DEVICES
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,6,7'
 
 # Default configuration
 DEFAULT_CFG = {
@@ -142,11 +136,23 @@ def parse_args():
                         help='Learning rate (overrides config)')
     parser.add_argument('--no-mixup', action='store_true',
                         help='Disable MixUp augmentation')
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='Comma-separated GPU IDs to use (e.g., "1,2,3,4"). If not specified, uses CUDA_VISIBLE_DEVICES env var or default "1,2,3,4,5,6,7"')
+    parser.add_argument('--num-devices', type=int, default=None,
+                        help='Number of GPU devices to use for DDP (overrides config, default: 4)')
     
     return parser.parse_args()
 
 # Parse arguments
 args = parse_args()
+
+# Set CUDA_VISIBLE_DEVICES (must be done before any CUDA operations)
+if args.gpus:
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
+    print(f"\n🖥️  Using GPUs: {args.gpus}")
+else:
+    # Default to 1-7 if not specified
+    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '1,2,3,4,5,6,7')
 
 # Load and merge configurations
 CFG = DEFAULT_CFG.copy()
@@ -164,6 +170,8 @@ if args.learning_rate is not None:
     CFG['LEARNING_RATE'] = args.learning_rate
 if args.no_mixup:
     CFG['USE_MIXUP'] = False
+if args.num_devices is not None:
+    CFG['NUM_DEVICES'] = args.num_devices
 
 seed_everything(CFG['SEED'])
 
@@ -183,6 +191,15 @@ if 'RANK' not in os.environ or os.environ.get('RANK', '0') == '0':
     if CFG['USE_MIXUP']:
         print(f"   MixUp Alpha: {CFG['MIXUP_ALPHA']}")
         print(f"   MixUp Prob: {CFG['MIXUP_PROB']}")
+    print(f"\n🖥️  GPU Configuration:")
+    import torch
+    if torch.cuda.is_available():
+        print(f"   Available GPUs: {torch.cuda.device_count()}")
+        print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+        for i in range(min(torch.cuda.device_count(), CFG['NUM_DEVICES'])):
+            print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+    else:
+        print(f"   WARNING: CUDA not available!")
     print(f"\n📐 Model Architecture:")
     print(f"   Embedding Dim: {CFG['MODEL']['EMB_DIM']}")
     print(f"   LSTM Hidden: {CFG['MODEL']['LSTM_HIDDEN']}")
@@ -273,15 +290,6 @@ fabric.print("데이터 로드 시작 (pre-processed 데이터 사용)")
 
 # Load pre-processed data from dataset_split_and_preprocess.py
 # These are already processed (continuous standardized, seq 결측치 처리됨)
-from merlin.io import Dataset as MerlinDataset
-
-def load_processed_dnn_data(data_path):
-    """Load pre-processed data from dataset_split_and_preprocess.py"""
-    dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
-    gdf = dataset.to_ddf().compute()
-    df = gdf.to_pandas()
-    return df
-
 train_df = load_processed_dnn_data("data/proc_train_t")
 val_df = load_processed_dnn_data("data/proc_train_v")
 cal_df = load_processed_dnn_data("data/proc_train_c")
@@ -297,27 +305,26 @@ seq_col = "seq"
 FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
 feature_cols = [c for c in train_df.columns if c not in FEATURE_EXCLUDE]
 
-cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
+# Categorical columns (based on analysis/results/feature_classification.json)
+cat_cols = ["gender", "age_group", "inventory_id"]
 num_cols = [c for c in feature_cols if c not in cat_cols]
 fabric.print(f"Num features: {len(num_cols)} | Cat features: {len(cat_cols)}")
 
-# Encode categorical features (fit on training data only)
-cat_encoders = {}
+# Categorical features are already encoded by NVTabular Categorify (0-based indices)
+# Calculate cardinalities for each categorical column
+cat_cardinalities = {}
 for col in cat_cols:
-    le = LabelEncoder()
-    # Fit on training data only (train/val/cal splits)
-    all_values = pd.concat([
-        train_df[col], val_df[col], cal_df[col]
-    ], axis=0).astype(str).fillna("UNK")
-    le.fit(all_values)
-    
-    # Transform each split
-    train_df[col] = le.transform(train_df[col].astype(str).fillna("UNK"))
-    val_df[col] = le.transform(val_df[col].astype(str).fillna("UNK"))
-    cal_df[col] = le.transform(cal_df[col].astype(str).fillna("UNK"))
-    cat_encoders[col] = le
+    # Get max value across all splits to determine cardinality
+    max_val = max(
+        train_df[col].max(),
+        val_df[col].max(),
+        cal_df[col].max()
+    )
+    # Cardinality = max_index + 1 (since 0-based indexing)
+    cat_cardinalities[col] = int(max_val) + 1
 
-fabric.print("범주형 피처 인코딩 완료")
+fabric.print("범주형 피처 이미 인코딩됨 (Categorify by NVTabular)")
+fabric.print(f"Categorical cardinalities: {cat_cardinalities}")
 
 if fabric.global_rank == 0:
     total_samples = len(train_df) + len(val_df) + len(cal_df)
@@ -363,8 +370,8 @@ def evaluate_model(fabric, model, val_loader, criterion):
     
     return val_loss, score, ap, wll, all_logits, all_preds, all_targets
 
-def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, norm_stats, target_col, 
-                config, output_dir):
+def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, target_col, 
+                config, output_dir, cat_cardinalities):
     """Train model with validation
     
     Args:
@@ -373,6 +380,7 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, n
             - USE_MIXUP, MIXUP_ALPHA, MIXUP_PROB
             - MODEL: {EMB_DIM, LSTM_HIDDEN, HIDDEN_UNITS, DROPOUT, CROSS_LAYERS}
             - LOG_INTERVAL
+        cat_cardinalities: dict of categorical feature cardinalities
     """
     batch_size = config['BATCH_SIZE']
     epochs = config['EPOCHS']
@@ -384,9 +392,9 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, n
     mixup_prob = config['MIXUP_PROB']
     
     # Create datasets and loaders
-    train_dataset = ClickDatasetDNN(train_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
-    val_dataset = ClickDatasetDNN(val_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
-    cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, norm_stats, target_col, True)
+    train_dataset = ClickDatasetDNN(train_df, num_cols, cat_cols, seq_col, target_col, True)
+    val_dataset = ClickDatasetDNN(val_df, num_cols, cat_cols, seq_col, target_col, True)
+    cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, target_col, True)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
@@ -399,10 +407,11 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, n
                             worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
     
     # Create model with architecture from config
-    cat_cardinalities = [len(cat_encoders[c].classes_) for c in cat_cols]
+    # cat_cardinalities는 dict → list 변환
+    cat_cardinalities_list = [cat_cardinalities[c] for c in cat_cols]
     model = WideDeepCTR(
         num_features=len(num_cols),
-        cat_cardinalities=cat_cardinalities,
+        cat_cardinalities=cat_cardinalities_list,
         emb_dim=config['MODEL']['EMB_DIM'],
         lstm_hidden=config['MODEL']['LSTM_HIDDEN'],
         hidden_units=config['MODEL']['HIDDEN_UNITS'],
@@ -559,11 +568,12 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, n
         os.rename(f'{save_dir}/best_model_temp.pt', final_model_path)
         print(f"✅ Model saved to {final_model_path}")
         
-        # Save cat_encoders
-        encoders_path = os.path.join(save_dir, 'cat_encoders.pkl')
-        with open(encoders_path, 'wb') as f:
-            pickle.dump(cat_encoders, f)
-        print(f"✅ Categorical encoders saved to {encoders_path}")
+        # Save cat_cardinalities (dict)
+        cardinalities_path = os.path.join(save_dir, 'cat_cardinalities.json')
+        with open(cardinalities_path, 'w') as f:
+            json.dump(cat_cardinalities, f, indent=2)
+        print(f"✅ Categorical cardinalities saved to {cardinalities_path}")
+        print(f"   {cat_cardinalities}")
         
         # Save metadata (including model architecture config)
         metadata = {
@@ -578,7 +588,7 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, n
             'timestamp': timestamp,
             'num_features': len(num_cols),
             'cat_features': cat_cols,
-            'cat_cardinalities': cat_cardinalities,
+            'cat_cardinalities': cat_cardinalities,  # dict 형태로 저장
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': lr,
@@ -614,10 +624,10 @@ model, best_score, save_dir = train_model(
     num_cols=num_cols,
     cat_cols=cat_cols,
     seq_col=seq_col,
-    norm_stats=norm_stats,
     target_col=target_col,
     config=CFG,
-    output_dir=output_dir
+    output_dir=output_dir,
+    cat_cardinalities=cat_cardinalities
 )
 
 # Final summary (only on rank 0)
