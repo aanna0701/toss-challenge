@@ -1,11 +1,14 @@
-import os
+# Standard library
 import gc
+import os
 import time
 
+# Third-party libraries
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from sklearn.preprocessing import LabelEncoder
 from torch.utils.data import Dataset
 
 
@@ -14,11 +17,11 @@ from torch.utils.data import Dataset
 # ============================================================================
 
 def create_workflow_gbdt():
-    """Create NVTabular workflow optimized for GBDT models"""
+    """Create NVTabular workflow with standardization and missing value handling"""
     import nvtabular as nvt
     from nvtabular import ops
     
-    print("\n🔧 Creating GBDT-optimized workflow...")
+    print("\n🔧 Creating GBDT workflow with standardization...")
 
     # TRUE CATEGORICAL COLUMNS (only 5)
     true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
@@ -39,37 +42,48 @@ def create_workflow_gbdt():
     print(f"   Continuous: {len(all_continuous)} columns")
     print(f"   Total features: {len(true_categorical) + len(all_continuous)}")
 
-    # Minimal preprocessing for GBDT models
+    # Preprocessing pipeline:
+    # 1. Categorify for categorical features
     cat_features = true_categorical >> ops.Categorify(
         freq_threshold=0,
         max_size=50000
     )
-    cont_features = all_continuous >> ops.FillMissing(fill_val=0)
+    
+    # 2. Normalize + FillMissing for continuous features
+    # - Normalize 먼저: 결측치 없는 데이터로 mean/std 계산 (실제 분포 반영)
+    # - FillMissing(0) 나중: 표준화 공간에서 0 = 평균값으로 imputation
+    cont_features = all_continuous >> ops.Normalize() >> ops.FillMissing(fill_val=0)
 
     workflow = nvt.Workflow(cat_features + cont_features + ['clicked'])
 
-    print("   ✅ Workflow created (no normalization for tree models)")
+    print("   ✅ Workflow created with standardization:")
+    print("      - Categorical: Categorify")
+    print("      - Continuous: Normalize(mean=0, std=1) + FillMissing(0)")
+    print("      - 순서: Normalize 먼저 (실제 분포로 통계), 그 후 결측치=0 (평균)")
     return workflow
 
 
 def process_data_with_nvtabular(data_path, temp_dir='tmp'):
     """Process data with NVTabular (matching train_and_predict_GBDT.py)"""
-    import shutil
+    import nvtabular as nvt
     import pandas as pd
     import pyarrow.parquet as pq
-    import nvtabular as nvt
     from merlin.io import Dataset
+    
     from utils import clear_gpu_memory
     
     print("\n" + "="*70)
     print("🚀 NVTabular Data Processing")
     print("="*70)
 
-    # Create temp directory if it doesn't exist
-    os.makedirs(temp_dir, exist_ok=True)
+    # Create unique temp directory for each file
+    import os
+    file_name = os.path.basename(data_path).replace('.parquet', '')
+    unique_temp_dir = f'{temp_dir}_{file_name}'
+    os.makedirs(unique_temp_dir, exist_ok=True)
 
     # Prepare data without 'seq' column
-    temp_path = f'{temp_dir}/train_no_seq.parquet'
+    temp_path = f'{unique_temp_dir}/train_no_seq.parquet'
     if not os.path.exists(temp_path):
         print("\n📋 Creating temp file without 'seq' column...")
         pf = pq.ParquetFile(data_path)
@@ -117,17 +131,30 @@ def process_data_with_nvtabular(data_path, temp_dir='tmp'):
         raise
 
 
-def load_processed_data_gbdt(data_path):
-    """Load processed data (matching train_and_predict_GBDT.py exactly)"""
+def load_processed_data_gbdt(data_path, drop_seq=True):
+    """
+    Load pre-processed data from dataset_split_and_preprocess.py
+    
+    Args:
+        data_path: Path to processed directory (e.g., 'data/proc_train_t')
+                   또는 legacy raw parquet file
+        drop_seq: If True, drop 'seq' column (for GBDT models)
+    
+    Returns:
+        X_np: numpy array of features (float32)
+        y: numpy array of labels
+    """
     from merlin.io import Dataset
     from utils import clear_gpu_memory
     
     print(f"\n📦 Loading data from {data_path}...")
+    if drop_seq:
+        print("   🗑️  seq column will be dropped (GBDT mode)")
     start_load = time.time()
     
     # Check if it's NVTabular processed data or raw parquet
     if os.path.isdir(data_path):
-        # NVTabular processed directory - load directly
+        # Pre-processed directory - load directly (FAST!)
         try:
             dataset = Dataset(data_path, engine='parquet', part_size='128MB')
             print("   Converting to GPU DataFrame...")
@@ -144,7 +171,8 @@ def load_processed_data_gbdt(data_path):
                 print(f"❌ Failed even with 64MB partitions: {e2}")
                 raise
     else:
-        # Raw parquet file - process with NVTabular
+        # Legacy: Raw parquet file - process with NVTabular (SLOW!)
+        print("   ⚠️  Raw parquet detected - processing on-the-fly (권장: dataset_split_and_preprocess.py 실행)")
         gdf = process_data_with_nvtabular(data_path)
     
     # Prepare X and y (matching train_and_predict_GBDT.py exactly)
@@ -154,6 +182,11 @@ def load_processed_data_gbdt(data_path):
     
     y = gdf['clicked'].to_numpy()
     X = gdf.drop('clicked', axis=1)
+    
+    # Drop seq column if requested (for GBDT)
+    if drop_seq and 'seq' in X.columns:
+        X = X.drop('seq', axis=1)
+        print("   ✅ Dropped 'seq' column")
     
     # Convert all features to float32 (single pass) - matching train_and_predict_GBDT.py
     print("   Converting all features to float32 (single pass)...")
@@ -253,7 +286,6 @@ def collate_fn_dnn_infer(batch):
 
 def encode_categoricals_dnn(train_df, test_df, cat_cols):
     """범주형 피처 인코딩 (DNN용)"""
-    from sklearn.preprocessing import LabelEncoder
     
     encoders = {}
     for col in cat_cols:

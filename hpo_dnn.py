@@ -7,31 +7,27 @@ warnings.filterwarnings('ignore')
 
 print("✅ Environment configured for DNN HPO")
 
-# Core imports
-import gc
-import time
-import numpy as np
-import pandas as pd
+# Standard library
 import argparse
-import yaml
-import json
+import gc
 import random
-from tqdm import tqdm
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score
+import time
 
-# PyTorch
+# Third-party libraries
+import numpy as np
+import optuna
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-
-# Optuna
-import optuna
+import yaml
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
+from sklearn.metrics import average_precision_score
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
-# MixUp
+# Custom modules
 from mixup import mixup_batch_torch
 
 print(f"✅ PyTorch version: {torch.__version__}")
@@ -193,13 +189,23 @@ class WideDeepCTR(nn.Module):
         return out.squeeze(1)
 
 def load_and_prepare_data(train_path, subsample_ratio=1.0, seed=42):
-    """Load and prepare data for HPO"""
+    """Load and prepare data for HPO (from pre-processed directory)"""
     print(f"\n📦 Loading data from {train_path}...")
     start_load = time.time()
     
-    # Load data
-    train_df = pd.read_parquet(train_path, engine="pyarrow")
-    print(f"   ✅ Loaded data: {len(train_df):,} rows x {len(train_df.columns)} columns")
+    # Check if it's a directory (pre-processed) or file (legacy)
+    if os.path.isdir(train_path):
+        # Load pre-processed data from dataset_split_and_preprocess.py
+        from merlin.io import Dataset as MerlinDataset
+        dataset = MerlinDataset(train_path, engine='parquet', part_size='128MB')
+        gdf = dataset.to_ddf().compute()
+        train_df = gdf.to_pandas()
+        print(f"   ✅ Loaded pre-processed data: {len(train_df):,} rows x {len(train_df.columns)} columns")
+        print(f"      (continuous standardized, seq 결측치 처리됨)")
+    else:
+        # Legacy: Load raw parquet file
+        train_df = pd.read_parquet(train_path, engine="pyarrow")
+        print(f"   ✅ Loaded data: {len(train_df):,} rows x {len(train_df.columns)} columns")
     
     # Subsample if needed
     if subsample_ratio < 1.0:
@@ -352,11 +358,13 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     
     avg_train_loss = train_loss / train_samples
     
-    # Validation
+    # Get predictions on validation and calibration sets
     model.eval()
+    
+    # Validation predictions
     val_loss = 0
-    all_preds = []
-    all_targets = []
+    val_preds = []
+    val_targets = []
     
     with torch.no_grad():
         val_pbar = tqdm(val_loader, desc=f"Trial {trial.number} Validation", leave=False)
@@ -372,15 +380,15 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
             val_loss += loss.item() * ys.size(0)
             
             preds = torch.sigmoid(logits).cpu().numpy()
-            all_preds.extend(preds)
-            all_targets.extend(ys.cpu().numpy())
+            val_preds.extend(preds)
+            val_targets.extend(ys.cpu().numpy())
     
-    val_loss = val_loss / len(all_targets)
-    all_preds = np.array(all_preds)
-    all_targets = np.array(all_targets)
+    val_loss = val_loss / len(val_targets)
+    val_preds = np.array(val_preds)
+    val_targets = np.array(val_targets)
     
-    # Calculate competition score
-    score, ap, wll = calculate_competition_score(all_targets, all_preds)
+    # Calculate score on validation set
+    score, ap, wll = calculate_competition_score(val_targets, val_preds)
     
     # Print results
     print(f"Trial {trial.number} - "
@@ -396,9 +404,9 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, norm_stats,
     
     return score
 
-def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0,
+def run_optimization(train_t_path, train_v_path, n_trials=50,
                      timeout=None, seed=42, use_mixup=True):
-    """Run Optuna optimization"""
+    """Run Optuna optimization using pre-split train_t and train_v data"""
     print("\n" + "="*70)
     print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna")
     print("="*70)
@@ -412,12 +420,17 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     print(f"\n🖥️  Device: {device}")
     
     # Load data
-    train_df = load_and_prepare_data(train_path, subsample_ratio, seed)
+    print(f"\n📦 Loading training data from {train_t_path}...")
+    train_df = load_and_prepare_data(train_t_path, 1.0, seed)
+    
+    print(f"\n📦 Loading validation data from {train_v_path}...")
+    val_df = load_and_prepare_data(train_v_path, 1.0, seed)
     
     # Define features
     target_col = "clicked"
     seq_col = "seq"
-    FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
+    # l_feat_20, l_feat_23은 dataset_split_and_preprocess.py에서 이미 제거됨
+    FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
     feature_cols = [c for c in train_df.columns if c not in FEATURE_EXCLUDE]
     
     cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
@@ -430,30 +443,17 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     # Encode categorical features
     train_df, cat_encoders = prepare_features(train_df, cat_cols)
     
-    # Load normalization stats
-    norm_stats_path = 'analysis/results/normalization_stats.json'
-    if os.path.exists(norm_stats_path):
-        with open(norm_stats_path, 'r', encoding='utf-8') as f:
-            norm_stats_data = json.load(f)
-            norm_stats = norm_stats_data['statistics']
-        print(f"   ✅ Loaded normalization stats from {norm_stats_path}")
-    else:
-        print(f"   ⚠️ Normalization stats not found at {norm_stats_path}, using raw features")
-        norm_stats = {}
-    
-    # Split data
-    print(f"\n📊 Splitting data (val_ratio={val_ratio})...")
-    train_split, val_split = train_test_split(
-        train_df, test_size=val_ratio, random_state=seed, stratify=train_df[target_col]
-    )
+    # Normalization stats not needed - data is already standardized
+    # Pass empty dict to ClickDataset (it will skip standardization)
+    norm_stats = {}
+    print("   ⚠️  Normalization skipped - data is already standardized by dataset_split_and_preprocess.py")
     
     print("\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
-    print(f"   Total samples: {len(train_df):,}")
-    print(f"   Train samples: {len(train_split):,}")
-    print(f"   Val samples: {len(val_split):,}")
-    print(f"   Train positive ratio: {train_split[target_col].mean():.4f}")
-    print(f"   Val positive ratio: {val_split[target_col].mean():.4f}")
+    print(f"   Train samples: {len(train_df):,}")
+    print(f"   Val samples: {len(val_df):,}")
+    print(f"   Train positive ratio: {train_df[target_col].mean():.4f}")
+    print(f"   Val positive ratio: {val_df[target_col].mean():.4f}")
     if timeout:
         print(f"   Timeout: {timeout}s")
     else:
@@ -472,7 +472,7 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
     # Optimize
     study.optimize(
         lambda trial: objective(
-            trial, train_split, val_split, num_cols, cat_cols, seq_col, 
+            trial, train_df, val_df, num_cols, cat_cols, seq_col, 
             norm_stats, cat_encoders, target_col, device, use_mixup
         ),
         n_trials=n_trials,
@@ -496,7 +496,7 @@ def run_optimization(train_path, n_trials=50, val_ratio=0.2, subsample_ratio=1.0
         print(f"   {key}: {value}")
     
     # Cleanup
-    del train_df, train_split, val_split
+    del train_df, val_df
     clear_gpu_memory()
     
     return study
@@ -524,8 +524,8 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
     
     # Extract hidden units and dropout rates
     n_layers = best_params.get('n_layers', 3)
-    hidden_units = [best_params[f'hidden_size_{i}'] for i in range(n_layers)]
-    dropout_rates = [best_params[f'dropout_{i}'] for i in range(n_layers)]
+    hidden_units = [128*2**(n_layers-(j+1)) for j in range(n_layers)]
+    dropout_rates = [0.1*(j+1) for j in range(n_layers)]
     
     config['MODEL']['WIDEDEEP']['HIDDEN_UNITS'] = hidden_units
     config['MODEL']['WIDEDEEP']['DROPOUT'] = dropout_rates
@@ -535,6 +535,12 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
         config['MODEL']['WIDEDEEP']['CROSS_LAYERS'] = best_params.get('cross_layers', 2)
     else:
         config['MODEL']['WIDEDEEP']['CROSS_LAYERS'] = best_params.get('cross_layers', 2)
+    
+    # Add MixUp parameters if present
+    if 'mixup_alpha' in best_params:
+        config['MODEL']['WIDEDEEP']['MIXUP_ALPHA'] = best_params['mixup_alpha']
+    if 'mixup_prob' in best_params:
+        config['MODEL']['WIDEDEEP']['MIXUP_PROB'] = best_params['mixup_prob']
     
     # Save
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -556,14 +562,12 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
 def main():
     parser = argparse.ArgumentParser(description='DNN (WideDeepCTR) Hyperparameter Optimization')
     
-    parser.add_argument('--train-path', type=str, default='data/train.parquet',
-                        help='Path to training data parquet file (default: data/train.parquet)')
+    parser.add_argument('--train-t-path', type=str, default='data/proc_train_t',
+                        help='Path to training data (default: data/proc_train_t)')
+    parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
+                        help='Path to validation data (default: data/proc_train_v)')
     parser.add_argument('--n-trials', type=int, default=50,
                         help='Number of optimization trials (default: 50)')
-    parser.add_argument('--val-ratio', type=float, default=0.2,
-                        help='Validation split ratio (default: 0.2)')
-    parser.add_argument('--subsample-ratio', type=float, default=1.0,
-                        help='Ratio of data to use (default: 1.0 = use all)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--seed', type=int, default=42,
@@ -580,11 +584,11 @@ def main():
     args = parser.parse_args()
     
     print("\n🔧 HPO Configuration:")
-    print(f"   Train path: {args.train_path}")
+    print(f"   Train data: {args.train_t_path}")
+    print(f"   Val data: {args.train_v_path}")
     print(f"   Trials: {args.n_trials}")
-    print(f"   Validation ratio: {args.val_ratio}")
-    print(f"   Subsample ratio: {args.subsample_ratio}")
     print(f"   Seed: {args.seed}")
+    print(f"   Use MixUp: {args.use_mixup}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
     else:
@@ -592,10 +596,9 @@ def main():
     
     # Run optimization
     study = run_optimization(
-        train_path=args.train_path,
+        train_t_path=args.train_t_path,
+        train_v_path=args.train_v_path,
         n_trials=args.n_trials,
-        val_ratio=args.val_ratio,
-        subsample_ratio=args.subsample_ratio,
         timeout=args.timeout,
         seed=args.seed,
         use_mixup=args.use_mixup

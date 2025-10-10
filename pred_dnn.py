@@ -1,16 +1,18 @@
-import pandas as pd
-import numpy as np
 import os
 import json
 import pickle
-from tqdm import tqdm
 import argparse
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 # Import common functions
 from utils import seed_everything, calculate_competition_score
@@ -203,8 +205,8 @@ def load_model_and_metadata(model_dir, device='cuda'):
     
     return model, cat_encoders, metadata
 
-def load_and_encode_test(test_path, cat_encoders, cat_cols):
-    """Load and encode test data"""
+def load_and_encode_test(test_path, cat_encoders, cat_cols, num_cols, seq_col, norm_stats, batch_size=2048):
+    """Load and encode test data, return dataset and dataloader"""
     print(f"\n📦 Loading test data from {test_path}...")
     
     test = pd.read_parquet(test_path, engine="pyarrow")
@@ -214,12 +216,42 @@ def load_and_encode_test(test_path, cat_encoders, cat_cols):
     print("   Encoding categorical features...")
     for col in cat_cols:
         if col in test.columns:
-            # Use transform (not fit_transform) to use training encodings
-            test[col] = cat_encoders[col].transform(test[col].astype(str).fillna("UNK"))
+            # Handle unknown values safely (test may have values not in training)
+            test_col = test[col].astype(str).fillna("UNK")
+            encoder = cat_encoders[col]
+            known_values = set(encoder.classes_)
+            
+            # Determine fallback value (prefer "UNK", else use most common class)
+            if "UNK" in known_values:
+                fallback = "UNK"
+            elif "0" in known_values:
+                fallback = "0"
+            else:
+                fallback = encoder.classes_[0]  # Use first class as fallback
+            
+            # Replace unseen values with fallback (vectorized operation)
+            mask = ~test_col.isin(known_values)
+            if mask.any():
+                n_unseen = mask.sum()
+                print(f"      [{col}] {n_unseen:,} unknown values → replaced with '{fallback}'")
+                test_col = test_col.copy()
+                test_col[mask] = fallback
+            
+            # Use transform with training encodings
+            test[col] = encoder.transform(test_col)
     
     print("   ✅ Test data loaded and encoded")
     
-    return test
+    # Create dataset and dataloader
+    print("   Creating dataset and dataloader...")
+    test_dataset = ClickDatasetDNN(test, num_cols, cat_cols, seq_col, norm_stats, has_target=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                            collate_fn=collate_fn_dnn_infer, pin_memory=True, 
+                            num_workers=4, prefetch_factor=8)
+    
+    print("   ✅ Dataset and dataloader created")
+    
+    return test_dataset, test_loader
 
 def find_best_calibration(model, cal_df, cat_cols, num_cols, seq_col, norm_stats, target_col, device='cuda', batch_size=2048, test_ratio=0.5):
     """
@@ -362,16 +394,10 @@ def find_best_calibration(model, cal_df, cat_cols, num_cols, seq_col, norm_stats
     
     return best_method, calibrators[best_method], results
 
-def predict_and_save(model, best_method, best_calibrator, test_df, cat_cols, num_cols, seq_col, norm_stats, output_path, batch_size=2048, device='cuda'):
+def predict_and_save(model, best_method, best_calibrator, test_dataset, test_loader, output_path, device='cuda'):
     """Generate predictions and save submission file"""
-    print(f"\n🔮 Predicting on test data...")
+    print("\n🔮 Predicting on test data...")
     print(f"   Using calibration method: {best_method.upper()}")
-    
-    # Create test dataset
-    test_dataset = ClickDatasetDNN(test_df, num_cols, cat_cols, seq_col, norm_stats, has_target=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                             collate_fn=collate_fn_dnn_infer, pin_memory=True, 
-                             num_workers=4, prefetch_factor=8)
     
     # Run inference
     all_logits = []
@@ -420,7 +446,7 @@ def predict_and_save(model, best_method, best_calibrator, test_df, cat_cols, num
     submission_df.to_csv(output_path, index=False)
     print(f"\n✅ Submission saved to {output_path}")
     print(f"   Samples: {len(submission_df):,}")
-    print(f"   Prediction stats:")
+    print("   Prediction stats:")
     print(f"      Mean: {all_preds.mean():.6f}")
     print(f"      Std: {all_preds.std():.6f}")
     print(f"      Min: {all_preds.min():.6f}")
@@ -482,7 +508,29 @@ def main():
         
         # Encode categorical features
         for col in cat_cols:
-            cal_df[col] = cat_encoders[col].transform(cal_df[col].astype(str).fillna("UNK"))
+            # Handle unknown values safely (though calibration is from training, be safe)
+            cal_col = cal_df[col].astype(str).fillna("UNK")
+            encoder = cat_encoders[col]
+            known_values = set(encoder.classes_)
+            
+            # Determine fallback value (prefer "UNK", else use most common class)
+            if "UNK" in known_values:
+                fallback = "UNK"
+            elif "0" in known_values:
+                fallback = "0"
+            else:
+                fallback = encoder.classes_[0]  # Use first class as fallback
+            
+            # Replace unseen values with fallback (vectorized operation)
+            mask = ~cal_col.isin(known_values)
+            if mask.any():
+                n_unseen = mask.sum()
+                print(f"      [{col}] {n_unseen:,} unknown values in calibration → replaced with '{fallback}'")
+                cal_col = cal_col.copy()
+                cal_col[mask] = fallback
+            
+            # Use transform with training encodings
+            cal_df[col] = encoder.transform(cal_col)
         
         # Get feature columns
         feature_cols = [c for c in cal_df.columns if c not in FEATURE_EXCLUDE]
@@ -495,29 +543,30 @@ def main():
         )
     else:
         print("\n⚠️  Calibration disabled by user (--no-calibration)")
-    
-    # Load and encode test data
-    test_df = load_and_encode_test(args.test_path, cat_encoders, cat_cols)
-    
-    # Define numerical columns (if not already defined from calibration)
-    if 'num_cols' not in locals():
-        feature_cols = [c for c in test_df.columns if c not in FEATURE_EXCLUDE]
+        # Define numerical columns when calibration is disabled
+        # We need to load a sample to get all feature columns
+        import pyarrow.parquet as pq
+        table = pq.read_table(args.test_path)
+        all_columns = table.column_names
+        feature_cols = [c for c in all_columns if c not in FEATURE_EXCLUDE]
         num_cols = [c for c in feature_cols if c not in cat_cols]
     
     print(f"\n📊 Features: Num={len(num_cols)} | Cat={len(cat_cols)}")
+    
+    # Load and encode test data with dataset and dataloader
+    test_dataset, test_loader = load_and_encode_test(
+        args.test_path, cat_encoders, cat_cols, num_cols, seq_col, norm_stats, 
+        batch_size=args.batch_size
+    )
     
     # Predict and save
     predict_and_save(
         model,
         best_method,
         best_calibrator,
-        test_df,
-        cat_cols,
-        num_cols,
-        seq_col,
-        norm_stats,
+        test_dataset,
+        test_loader,
         args.output_path,
-        batch_size=args.batch_size,
         device=args.device
     )
     

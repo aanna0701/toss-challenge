@@ -12,16 +12,16 @@ print("✅ Environment configured")
 # Required libraries and versions
 required_libs = {
     'nvtabular': '23.08.00',
-    'cudf': '23.10',      # Prefix match
-    'cupy': '13.6',       # Prefix match
-    'xgboost': '3.0',     # Minimum version
-    'catboost': '1.2',    # Minimum version
+    'cudf': '23.10',
+    'cupy': '13.6',
+    'xgboost': '3.0',
+    'catboost': '1.2',
     'dask': '2023.9',
     'pandas': '1.5',
     'numpy': '1.24',
     'scikit-learn': '1.7',
-    'psutil': '5.9',      # 5.9.1 works fine (used in working code)
-    'pyarrow': '12.0'     # 12.0.1 works fine (used in working code)
+    'psutil': '5.9',
+    'pyarrow': '12.0'
 }
 
 # Check installed versions
@@ -59,17 +59,19 @@ for lib, required_version in required_libs.items():
         except (AttributeError, ImportError):
             installed_version = 'unknown'
 
-        # Check version compatibility (lenient)
-        req_major = required_version.split('.')[0]
-        inst_version_parts = installed_version.split('.')
-        inst_major = inst_version_parts[0] if installed_version != 'unknown' else ''
-
+        # Simple version check (lenient)
         if installed_version == 'unknown':
-            print(f"⚠️  {lib:15} {installed_version:15} (required: ≥{required_version})")
-        elif float(inst_major) >= float(req_major) if inst_major.isdigit() and req_major.isdigit() else installed_version.startswith(required_version[:3]):
-            print(f"✅ {lib:15} {installed_version:15} (required: ≥{required_version})")
+            status = "⚠️ "
         else:
-            print(f"⚠️  {lib:15} {installed_version:15} (required: ≥{required_version}) - but should work")
+            # Extract major version for comparison
+            try:
+                inst_major = int(installed_version.split('.')[0])
+                req_major = int(required_version.split('.')[0])
+                status = "✅" if inst_major >= req_major else "⚠️ "
+            except (ValueError, IndexError):
+                status = "✅"  # If can't parse, assume OK
+        
+        print(f"{status} {lib:15} {installed_version:15} (required: ≥{required_version})")
 
     except ImportError:
         missing_libs.append(lib)
@@ -83,58 +85,44 @@ if missing_libs:
 elif all_good:
     print("\n✅ All required libraries are installed and compatible!")
 
-# Core imports
-import gc
+# Standard library
+import argparse
+import json
+import shutil
 import time
-import numpy as np
-import pandas as pd
-import pyarrow.parquet as pq
+import yaml
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Dict
 
-# GPU libraries
+# Third-party libraries
 import cupy as cp
+import numpy as np
 
-# ==== RMM / cuDF allocator 초기화 (NVTabular/ cuDF 사용 전 1회) ====
+# Initialize RMM for GPU memory management
 try:
-    import rmm, cudf
-    # RTX 3090 24GB 기준: 10~14GB 선할당 권장 (필요 시 조정)
-    # 10GB를 바이트로 변환: 10 * 1024^3
-    initial_pool_size_bytes = 10 * 1024 * 1024 * 1024
+    import rmm
+    
+    initial_pool_size_bytes = 10 * 1024 * 1024 * 1024  # 10GB
     rmm.reinitialize(
         pool_allocator=True,
-        initial_pool_size=initial_pool_size_bytes,    # 8~14GB 사이에서 조정 가능
-        managed_memory=True,         # 부족분 UVM 사용
+        initial_pool_size=initial_pool_size_bytes,
+        managed_memory=True,
     )
     print("✅ RMM initialized (pool=10GB, managed_memory=True)")
 except (ImportError, RuntimeError) as e:
     print(f"⚠️ RMM init skipped: {e}")
 
-# Set GPU device (CUDA_VISIBLE_DEVICES 고려: 가시 목록 내 0번째)
+# Set GPU device
 cp.cuda.Device(0).use()
 
-# NVTabular
-import nvtabular as nvt
-from nvtabular import ops
-from merlin.io import Dataset
-
 # ML libraries
-import xgboost as xgb
 import catboost as cb
+import xgboost as xgb
 
-# Configuration
-import yaml
-import argparse
-from dataclasses import dataclass
-from typing import Dict, Any
-
-# Import common functions
-from utils import (
-    calculate_competition_score, 
-    clear_gpu_memory, 
-    print_memory
-)
-from data_loader import create_workflow_gbdt
+# Custom modules
 from mixup import apply_mixup_to_dataset
+from utils import calculate_competition_score, clear_gpu_memory, print_memory
 
 @dataclass
 class GBDTConfig:
@@ -144,7 +132,6 @@ class GBDTConfig:
     train_c_path: str
     output_dir: str
     temp_dir: str
-    force_reprocess: bool
     model_name: str
     model_params: Dict[str, Any]
     use_mixup: bool = False
@@ -181,13 +168,6 @@ def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str =
         script_dir = os.path.dirname(os.path.abspath(__file__))
         temp_dir = os.path.join(script_dir, temp_dir)
 
-    # Extract training config
-    training_config = yaml_config.get('training', {})
-    force_reprocess = training_config.get('force_reprocess', False)
-    use_mixup = training_config.get('use_mixup', False)
-    mixup_alpha = training_config.get('mixup_alpha', 0.3)
-    mixup_ratio = training_config.get('mixup_ratio', 0.5)
-
     # Extract model config
     model_config = yaml_config.get('model', {})
     final_model_name = model_config.get('name', 'xgboost')
@@ -200,36 +180,29 @@ def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str =
         output_dir = os.path.join(script_dir, output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get model parameters
+    # Get model parameters and extract MixUp settings from model config
     if final_model_name == 'xgboost':
-        xgb_config = yaml_config.get('xgboost', {})
-        model_params = {
-            'n_estimators': xgb_config.get('n_estimators', 200),
-            'learning_rate': xgb_config.get('learning_rate', 0.1),
-            'max_depth': xgb_config.get('max_depth', 8),
-            'subsample': xgb_config.get('subsample', 0.8),
-            'colsample_bytree': xgb_config.get('colsample_bytree', 0.8),
-            'tree_method': xgb_config.get('tree_method', 'gpu_hist'),
-            'gpu_id': xgb_config.get('gpu_id', 0),
-            'verbosity': xgb_config.get('verbosity', 0),
-            'early_stopping_rounds': xgb_config.get('early_stopping_rounds', 20),
-            'random_state': xgb_config.get('random_state', 42)
-        }
+        model_config_full = yaml_config.get('xgboost', {}).copy()
     else:  # catboost
-        cb_config = yaml_config.get('catboost', {})
-        model_params = {
-            'n_estimators': cb_config.get('n_estimators', 200),
-            'learning_rate': cb_config.get('learning_rate', 0.1),
-            'max_depth': cb_config.get('max_depth', 8),
-            'colsample_bylevel': cb_config.get('colsample_bylevel', 0.8),
-            'task_type': cb_config.get('task_type', 'GPU'),
-            'devices': cb_config.get('devices', '0'),
-            'verbose': cb_config.get('verbose', False),
-            'early_stopping_rounds': cb_config.get('early_stopping_rounds', 20),
-            'thread_count': cb_config.get('thread_count', -1),
-            'random_state': cb_config.get('random_state', 42),
-            'bootstrap_type': cb_config.get('bootstrap_type', 'Bayesian')
-        }
+        model_config_full = yaml_config.get('catboost', {}).copy()
+    
+    # Extract MixUp settings from model config
+    use_mixup = model_config_full.pop('use_mixup', False)
+    mixup_alpha = model_config_full.pop('mixup_alpha', 0.3)
+    mixup_ratio = model_config_full.pop('mixup_ratio', 0.5)
+    
+    # Prepare model parameters (MixUp settings removed)
+    model_params = model_config_full
+    
+    if final_model_name == 'xgboost':
+        # Add XGBoost-specific parameters
+        model_params['objective'] = 'binary:logistic'
+        model_params['predictor'] = 'gpu_predictor'
+    else:  # catboost
+        # GPU에서는 colsample_bylevel (rsm) 지원하지 않음
+        if model_params.get('task_type') == 'GPU' and 'colsample_bylevel' in model_params:
+            print("   ⚠️ Removing colsample_bylevel for GPU training (not supported)")
+            model_params.pop('colsample_bylevel', None)
 
     return GBDTConfig(
         train_t_path=train_t_path,
@@ -237,7 +210,6 @@ def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str =
         train_c_path=train_c_path,
         output_dir=output_dir,
         temp_dir=temp_dir,
-        force_reprocess=force_reprocess,
         model_name=final_model_name,
         model_params=model_params,
         use_mixup=use_mixup,
@@ -253,64 +225,13 @@ def _deep_update(base_dict: Dict, update_dict: Dict) -> None:
         else:
             base_dict[key] = value
 
-def get_model_params_dict(config: GBDTConfig, scale_pos_weight: float = None) -> Dict[str, Any]:
-    """Get model parameters as dictionary for training"""
-    if config.model_name == 'xgboost':
-        params = {
-            'objective': 'binary:logistic',
-            'tree_method': config.model_params['tree_method'],
-            'max_depth': config.model_params['max_depth'],
-            'learning_rate': config.model_params['learning_rate'],
-            'subsample': config.model_params['subsample'],
-            'colsample_bytree': config.model_params['colsample_bytree'],
-            'gpu_id': config.model_params['gpu_id'],
-            'verbosity': config.model_params['verbosity'],
-            'seed': config.model_params['random_state'],
-
-            # 메모리 사용 감소
-            'max_bin': 128,
-            'predictor': 'gpu_predictor',
-        }
-
-        if scale_pos_weight:
-            params['scale_pos_weight'] = scale_pos_weight
-        return params
-
-    elif config.model_name == 'catboost':
-        params = {
-            'task_type': config.model_params['task_type'],
-            'devices': config.model_params['devices'],
-            'iterations': config.model_params['n_estimators'],
-            'learning_rate': config.model_params['learning_rate'],
-            'depth': config.model_params['max_depth'],
-            'verbose': config.model_params['verbose'],
-            'random_seed': config.model_params['random_state'],
-            'thread_count': config.model_params['thread_count'],
-            'bootstrap_type': config.model_params['bootstrap_type']
-        }
-        
-        # GPU에서는 colsample_bylevel (rsm) 지원하지 않음 - CPU에서만 지원
-        if config.model_params['task_type'] == 'GPU':
-            print("   ⚠️ Skipping colsample_bylevel for GPU training (not supported)")
-        else:
-            params['colsample_bylevel'] = config.model_params['colsample_bylevel']
-            
-        if scale_pos_weight:
-            params['class_weights'] = [1.0, scale_pos_weight]
-        return params
-
-    else:
-        raise ValueError(f"Unknown model: {config.model_name}")
-
 def print_config(config: GBDTConfig):
     """Print configuration details"""
     print(f"\n📋 GBDT Configuration:")
     print(f"   Model: {config.model_name}")
     print(f"   Train data: {config.train_t_path}")
     print(f"   Val data: {config.train_v_path}")
-    print(f"   Cal data: {config.train_c_path}")
     print(f"   Output: {config.output_dir}")
-    print(f"   Force reprocess: {config.force_reprocess}")
     print(f"   MixUp enabled: {config.use_mixup}")
     if config.use_mixup:
         print(f"   MixUp alpha: {config.mixup_alpha}")
@@ -322,15 +243,9 @@ def print_config(config: GBDTConfig):
         print(f"   {key}: {value}")
 
 print("✅ All libraries imported successfully")
-print(f"NVTabular version: {nvt.__version__}")
-print(f"XGBoost version: {xgb.__version__}")
-print(f"CatBoost version: {cb.__version__}")
-print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
-
-# Test imported functions
-print("Testing memory functions:")
-print_memory()
-clear_gpu_memory()
+print(f"   XGBoost: {xgb.__version__}")
+print(f"   CatBoost: {cb.__version__}")
+print(f"   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}")
 
 # Argument parser
 def parse_args():
@@ -341,8 +256,6 @@ def parse_args():
                         help='Path to YAML configuration file')
     parser.add_argument('--preset', type=str, default=None,
                         help='Preset configuration (e.g., xgboost_fast, catboost_deep)')
-    parser.add_argument('--force-reprocess', action='store_true',
-                        help='Force reprocessing of data even if processed data exists')
 
     return parser.parse_args()
 
@@ -353,258 +266,70 @@ args = parse_args()
 print("\n🔧 Command line arguments:")
 print(f"   Config file: {args.config}")
 print(f"   Preset: {args.preset}")
-print(f"   Force reprocess: {args.force_reprocess}")
 
 CONFIG = create_config_from_yaml(args.config, preset=args.preset)
 
-# Override config with command line arguments if provided
-if args.force_reprocess:
-    CONFIG.force_reprocess = True
-
 print_config(CONFIG)
 
-# Test workflow creation
-test_workflow = create_workflow_gbdt()
-print("✅ Workflow creation tested successfully")
+# Skip process_data() - use HPO-style independent processing instead
+# Each split will be processed independently in run_train() using load_processed_data_gbdt()
+print("\n📋 Data processing will be done independently for each split (HPO-style)")
+print("   This ensures identical behavior between HPO and training")
 
-def process_data():
-    """Process data with NVTabular - process each split separately"""
-    import shutil
-
+def run_train():
+    """Run training using pre-processed data"""
     print("\n" + "="*70)
-    print("🚀 NVTabular Data Processing")
-    print("="*70)
-
-    # Check if already processed
-    if os.path.exists(CONFIG.output_dir) and not CONFIG.force_reprocess:
-        try:
-            test_dataset = Dataset(CONFIG.output_dir, engine='parquet')
-            print(f"✅ Using existing processed data from {CONFIG.output_dir}")
-            return CONFIG.output_dir
-        except:
-            print(f"⚠️ Existing data corrupted, reprocessing...")
-            shutil.rmtree(CONFIG.output_dir)
-
-    # Clear existing if needed
-    if os.path.exists(CONFIG.output_dir):
-        print(f"🗑️ Removing existing directory {CONFIG.output_dir}")
-        shutil.rmtree(CONFIG.output_dir)
-
-    start_time = time.time()
-    initial_mem = print_memory()
-
-    # Create temp directory if it doesn't exist
-    os.makedirs(CONFIG.temp_dir, exist_ok=True)
-
-    # Process all three splits: train_t, train_v, train_c
-    split_paths = {
-        'train': CONFIG.train_t_path,
-        'val': CONFIG.train_v_path,
-        'cal': CONFIG.train_c_path
-    }
-    
-    temp_paths = {}
-    
-    print("\n📋 Creating temp files without 'seq' column...")
-    for split_name, split_path in split_paths.items():
-        temp_path = f'{CONFIG.temp_dir}/{split_name}_no_seq.parquet'
-        temp_paths[split_name] = temp_path
-        
-        if not os.path.exists(temp_path):
-            print(f"   Processing {split_name} split: {split_path}")
-            pf = pq.ParquetFile(split_path)
-            cols = [c for c in pf.schema.names if c not in ['seq', '']]
-            
-            df = pd.read_parquet(split_path, columns=cols)
-            print(f"      Loaded {len(df):,} rows")
-            df.to_parquet(temp_path, index=False)
-            del df
-            gc.collect()
-            print(f"      ✅ Temp file created: {temp_path}")
-        else:
-            print(f"   ✅ Using existing temp file: {temp_path}")
-
-    # Combine all temp files into one dataset for workflow fitting
-    # ⚠️ IMPORTANT: 순서를 유지해야 함! (train → val → cal)
-    # 나중에 run_train()에서 인덱스로 다시 분할하므로 순서가 중요
-    print("\n📦 Combining data for workflow fitting...")
-    combined_temp_path = f'{CONFIG.temp_dir}/combined_no_seq.parquet'
-    
-    if not os.path.exists(combined_temp_path):
-        dfs = []
-        for split_name in ['train', 'val', 'cal']:  # ✅ 순서 보존!
-            df = pd.read_parquet(temp_paths[split_name])
-            dfs.append(df)
-            print(f"   Loaded {split_name}: {len(df):,} rows")
-        
-        combined_df = pd.concat(dfs, ignore_index=True)  # ✅ 순서대로 concat
-        print(f"   Total combined: {len(combined_df):,} rows")
-        print(f"   ⚠️  Order preserved: train → val → cal")
-        combined_df.to_parquet(combined_temp_path, index=False)
-        del dfs, combined_df
-        gc.collect()
-        print("   ✅ Combined temp file created")
-    else:
-        print(f"   ✅ Using existing combined temp file: {combined_temp_path}")
-
-    # Create dataset with balanced partitions
-    print("\n📦 Creating NVTabular Dataset...")
-    print("   Using 64MB partitions for better throughput vs memory")
-    clear_gpu_memory()
-
-    dataset = Dataset(
-        combined_temp_path,
-        engine='parquet',
-        part_size='64MB'
-    )
-    print("   ✅ Dataset created")
-
-    # Create and fit workflow
-    print("\n📊 Fitting workflow...")
-    workflow = create_workflow_gbdt()
-    workflow.fit(dataset)
-    print("   ✅ Workflow fitted")
-
-    # Transform and save
-    print(f"\n💾 Transforming and saving to {CONFIG.output_dir}...")
-    os.makedirs(CONFIG.output_dir, exist_ok=True)
-
-    clear_gpu_memory()
-
-    try:
-        workflow.transform(dataset).to_parquet(
-            output_path=CONFIG.output_dir,
-            shuffle=None,  # ✅ 순서 보존을 위해 shuffle 제거
-            out_files_per_proc=32
-        )
-
-        workflow_path = f'{CONFIG.output_dir}/workflow'
-        workflow.save(workflow_path)
-        print(f"   ✅ Data processed and saved")
-        print(f"   ✅ Workflow saved to {workflow_path}")
-
-    except (OSError, RuntimeError, MemoryError) as e:
-        print(f"❌ Error during processing: {e}")
-        if os.path.exists(CONFIG.output_dir):
-            shutil.rmtree(CONFIG.output_dir, ignore_errors=True)
-        raise
-
-    elapsed = time.time() - start_time
-    final_mem = print_memory()
-
-    print("\n✅ Processing complete!")
-    print(f"   Time: {elapsed:.1f}s")
-    print(f"   Memory increase: +{final_mem - initial_mem:.1f}%")
-
-    clear_gpu_memory()
-    return CONFIG.output_dir
-
-# Process data
-processed_dir = process_data()
-
-def run_train(processed_dir):
-    """Run training with pre-split train/validation/calibration data"""
-    print("\n" + "="*70)
-    print("🔄 Loading Pre-split Train/Validation/Calibration Data")
+    print("🔄 Loading Pre-Processed Data")
     print("="*70)
     print(f"   Train: {CONFIG.train_t_path}")
     print(f"   Val: {CONFIG.train_v_path}")
-    print(f"   Cal: {CONFIG.train_c_path}")
+    print(f"   ⚡ Using pre-processed data (fast loading)")
 
-    # Load processed data with smaller partitions
-    print("\n📦 Loading processed data...")
     start_load = time.time()
 
-    try:
-        dataset = Dataset(processed_dir, engine='parquet', part_size='128MB')
-        print("   Converting to GPU DataFrame...")
-        gdf = dataset.to_ddf().compute()
-        print(f"   ✅ Loaded {len(gdf):,} rows x {len(gdf.columns)} columns")
-        print(f"   Time: {time.time() - start_load:.1f}s")
-    except (OSError, RuntimeError, MemoryError) as e:
-        print(f"❌ Error loading data: {e}")
-        print("   Trying with even smaller partitions...")
-        try:
-            dataset = Dataset(processed_dir, engine='parquet', part_size='64MB')
-            gdf = dataset.to_ddf().compute()
-            print(f"   ✅ Loaded with 64MB partitions: {len(gdf):,} rows")
-        except (OSError, RuntimeError, MemoryError) as e2:
-            print(f"❌ Failed even with 64MB partitions: {e2}")
-            return None
-
-    print_memory()
-
-    # Prepare data with memory optimization
-    print("\n📊 Preparing data for GBDT...")
-    y = gdf['clicked'].to_numpy()
-    X = gdf.drop('clicked', axis=1)
-
-    # 전체 컬럼 일괄 float32 변환
-    print("   Converting all features to float32 (single pass)...")
-    try:
-        X = X.astype('float32', copy=False)
-    except (ValueError, TypeError) as e:
-        print(f"   ⚠️ astype(float32) failed with copy=False: {e}")
-        X = X.astype('float32')
-
-    # Convert to numpy
-    print("   Converting to numpy...")
-    X_np = X.to_numpy()
-    print(f"   Shape: {X_np.shape}")
-    print(f"   Features: {X.shape[1]}")
-    print(f"   Samples: {X.shape[0]:,}")
-
-    # Class distribution
-    pos_ratio = y.mean()
-    scale_pos_weight = (1 - pos_ratio) / pos_ratio
-    print("\n📊 Overall class distribution:")
-    print(f"   Positive ratio: {pos_ratio:.4f}")
-    print(f"   Scale pos weight: {scale_pos_weight:.2f}")
-
-    # Enhanced cleanup
-    del X, gdf
-    gc.collect()
+    # Import the same function HPO uses
+    from data_loader import load_processed_data_gbdt
+    
+    # Load TRAIN data (pre-processed, drop seq for GBDT)
+    print("\n📦 Loading train data...")
+    X_train, y_train = load_processed_data_gbdt(CONFIG.train_t_path, drop_seq=True)
+    print(f"   Train shape: {X_train.shape}")
+    print(f"   Train positive ratio: {y_train.mean():.6f}")
+    
     clear_gpu_memory()
 
-    # Get model parameters
-    params = get_model_params_dict(CONFIG, scale_pos_weight)
+    # Load VAL data (pre-processed, drop seq for GBDT)
+    print("\n📦 Loading val data...")
+    X_val, y_val = load_processed_data_gbdt(CONFIG.train_v_path, drop_seq=True)
+    print(f"   Val shape: {X_val.shape}")
+    print(f"   Val positive ratio: {y_val.mean():.6f}")
+    
+    clear_gpu_memory()
+
+    print(f"\n⏱️  Loading time: {time.time() - start_load:.1f}s")
+    print_memory()
+
+    # Class distribution
+    pos_ratio = y_train.mean()
+    scale_pos_weight = (1 - pos_ratio) / pos_ratio
+    print("\n📊 Train data class distribution:")
+    print(f"   Positive ratio: {pos_ratio:.6f}")
+    print(f"   Scale pos weight: {scale_pos_weight:.2f}")
+
+    # Get model parameters and add scale_pos_weight
+    params = CONFIG.model_params.copy()
+    if scale_pos_weight:
+        if CONFIG.model_name == 'xgboost':
+            params['scale_pos_weight'] = scale_pos_weight
+        else:  # catboost
+            params['class_weights'] = [1.0, scale_pos_weight]
 
     print(f"\n🔧 Using {CONFIG.model_name} with parameters:")
     for key, value in params.items():
         print(f"   {key}: {value}")
 
-    # Split data based on original file sizes
-    # ⚠️ CRITICAL: process_data()에서 순서대로 결합됨 (train → val → cal)
-    # shuffle=None으로 설정되어 순서가 보존되므로 인덱스로 분할 가능
-    print("\n🔄 Splitting data based on original file sizes...")
-    
-    # Load original files to get sizes
-    df_train_orig = pd.read_parquet(CONFIG.train_t_path, columns=['clicked'])
-    df_val_orig = pd.read_parquet(CONFIG.train_v_path, columns=['clicked'])
-    df_cal_orig = pd.read_parquet(CONFIG.train_c_path, columns=['clicked'])
-    
-    train_size = len(df_train_orig)
-    val_size = len(df_val_orig)
-    cal_size = len(df_cal_orig)
-    
-    del df_train_orig, df_val_orig, df_cal_orig
-    gc.collect()
-    
-    # Create index splits (순서 보존되어 있으므로 인덱스로 분할)
-    train_idx = np.arange(0, train_size)  # [0:train_size]
-    val_idx = np.arange(train_size, train_size + val_size)  # [train_size:train_size+val_size]
-    cal_idx = np.arange(train_size + val_size, train_size + val_size + cal_size)  # [train_size+val_size:end]
-    
-    print(f"   Train: {len(train_idx):,} samples ({len(train_idx)/len(y):.1%})")
-    print(f"   Val: {len(val_idx):,} samples ({len(val_idx)/len(y):.1%})")
-    print(f"   Cal: {len(cal_idx):,} samples ({len(cal_idx)/len(y):.1%})")
-    print(f"   Train positive ratio: {y[train_idx].mean():.4f}")
-    print(f"   Val positive ratio: {y[val_idx].mean():.4f}")
-    print(f"   Cal positive ratio: {y[cal_idx].mean():.4f}")
-    
-    # Apply MixUp augmentation if enabled
-    X_train = X_np[train_idx]
-    y_train = y[train_idx]
+    # Store original train size before MixUp
+    original_train_size = len(X_train)
     sample_weight_train = None
     
     if CONFIG.use_mixup:
@@ -613,7 +338,6 @@ def run_train(processed_dir):
         print(f"   Ratio: {CONFIG.mixup_ratio}")
         
         # Calculate class weight for base_weight
-        pos_ratio = y_train.mean()
         class_weight = (1.0, scale_pos_weight)
         
         X_train, y_train, sample_weight_train = apply_mixup_to_dataset(
@@ -624,9 +348,9 @@ def run_train(processed_dir):
             rng=np.random.default_rng(42)
         )
         
-        print(f"   Original train samples: {len(train_idx):,}")
+        print(f"   Original train samples: {original_train_size:,}")
         print(f"   Augmented train samples: {len(X_train):,}")
-        print(f"   Added {len(X_train) - len(train_idx):,} MixUp samples")
+        print(f"   Added {len(X_train) - original_train_size:,} MixUp samples")
         print(f"   Train positive ratio (soft): {y_train.mean():.4f}")
     else:
         print("\n⚠️  MixUp disabled")
@@ -647,10 +371,10 @@ def run_train(processed_dir):
             dtrain = xgb.DMatrix(X_train, label=y_train, weight=sample_weight_train)
         else:
             dtrain = xgb.DMatrix(X_train, label=y_train)
-        dval = xgb.DMatrix(X_np[val_idx], label=y[val_idx])
+        dval = xgb.DMatrix(X_val, label=y_val)
 
         print("   Training XGBoost...")
-        if CONFIG.use_mixup:
+        if CONFIG.use_mixup and sample_weight_train is not None:
             print(f"   Using sample weights (range: [{sample_weight_train.min():.2f}, {sample_weight_train.max():.2f}])")
         model = xgb.train(
             params, dtrain,
@@ -672,25 +396,25 @@ def run_train(processed_dir):
             model.fit(
                 X_train, y_train,
                 sample_weight=sample_weight_train,
-                eval_set=(X_np[val_idx], y[val_idx]),
+                eval_set=(X_val, y_val),
                 early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
                 verbose=False
             )
         else:
             model.fit(
                 X_train, y_train,
-                eval_set=(X_np[val_idx], y[val_idx]),
+                eval_set=(X_val, y_val),
                 early_stopping_rounds=CONFIG.model_params['early_stopping_rounds'],
                 verbose=False
             )
-        y_pred = model.predict_proba(X_np[val_idx])[:, 1]
+        y_pred = model.predict_proba(X_val)[:, 1]
         best_iteration = model.get_best_iteration()
     
     else:
         raise ValueError(f"Unknown model: {CONFIG.model_name}")
 
     # Validation results
-    score, ap, wll = calculate_competition_score(y[val_idx], y_pred)
+    score, ap, wll = calculate_competition_score(y_val, y_pred)
 
     print("\n📊 Validation Results:")
     print(f"   Score: {score:.6f}")
@@ -723,25 +447,25 @@ def run_train(processed_dir):
         'val_ap': float(ap),
         'val_wll': float(wll),
         'best_iteration': int(best_iteration) if best_iteration else None,
-        'train_samples': len(train_idx),
-        'val_samples': len(val_idx),
-        'cal_samples': len(cal_idx),
+        'train_samples': len(y_train) if not CONFIG.use_mixup else original_train_size,
+        'val_samples': len(y_val),
         'use_mixup': CONFIG.use_mixup,
         'mixup_alpha': CONFIG.mixup_alpha if CONFIG.use_mixup else None,
         'mixup_ratio': CONFIG.mixup_ratio if CONFIG.use_mixup else None,
         'timestamp': timestamp,
-        'model_params': CONFIG.model_params
+        'model_params': CONFIG.model_params,
+        'processing_method': 'hpo_compatible_independent',  # HPO-compatible independent processing
+        'data_source': 'raw_parquet_with_independent_workflow'  # Each split processed independently
     }
     
     metadata_path = os.path.join(save_dir, 'metadata.json')
-    import json
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2)
     print(f"   ✅ Metadata saved to {metadata_path}")
 
     # Cleanup
     print("\n🧹 Cleaning up memory...")
-    del X_np, y, X_train, y_train, model, y_pred
+    del X_train, y_train, X_val, y_val, model, y_pred
     if sample_weight_train is not None:
         del sample_weight_train
     if dtrain is not None:
@@ -754,7 +478,7 @@ def run_train(processed_dir):
     return score, ap, wll, save_dir
 
 # Run training
-val_score, val_ap, val_wll, save_dir = run_train(processed_dir)
+val_score, val_ap, val_wll, save_dir = run_train()
 
 # Final summary
 if val_score:
@@ -766,10 +490,10 @@ if val_score:
     print(f"✅ Validation WLL: {val_wll:.6f}")
     print(f"✅ Model used: {CONFIG.model_name}")
     print(f"✅ Models saved to: {save_dir}")
-    print("✅ Full dataset processed")
+    print("✅ HPO-Compatible Processing: Each split processed independently")
     print("✅ GBDT-optimized preprocessing (no normalization)")
-    print(f"✅ Using pre-split data: train_t / train_v / train_c")
-    print(f"✅ Note: Calibration will be performed during prediction (pred_gbdt.py)")
+    print(f"✅ Data source: {CONFIG.train_t_path}, {CONFIG.train_v_path}")
+    print(f"✅ Identical behavior to hpo_xgboost.py for consistency")
     print("="*70)
 else:
     print("\n⚠️ Training did not complete. Please check for errors above.")
@@ -777,23 +501,19 @@ else:
 # Final cleanup
 clear_gpu_memory()
 
-# Clean up temporary files
+# Clean up temporary files created by load_processed_data_gbdt
 print("\n🧹 Final cleanup...")
-temp_files = [
-    f'{CONFIG.temp_dir}/train_no_seq.parquet',
-    f'{CONFIG.temp_dir}/val_no_seq.parquet',
-    f'{CONFIG.temp_dir}/cal_no_seq.parquet',
-    f'{CONFIG.temp_dir}/combined_no_seq.parquet'
-]
+print("   Temporary files are managed by data_loader.load_processed_data_gbdt()")
 
-for temp_path in temp_files:
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-        print(f"   ✅ Removed {temp_path}")
-
-if os.path.exists(CONFIG.temp_dir) and not os.listdir(CONFIG.temp_dir):
-    os.rmdir(CONFIG.temp_dir)
-    print(f"   ✅ Removed empty directory {CONFIG.temp_dir}")
+# Clean up any temp directories if they exist
+for data_file in ['train_t', 'train_v']:
+    temp_subdir = f'{CONFIG.temp_dir}_{data_file}'
+    if os.path.exists(temp_subdir):
+        try:
+            shutil.rmtree(temp_subdir)
+            print(f"   ✅ Removed {temp_subdir}")
+        except Exception as e:
+            print(f"   ⚠️  Could not remove {temp_subdir}: {e}")
 
 print("🧹 Final cleanup complete")
 print_memory()

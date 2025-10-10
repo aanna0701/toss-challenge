@@ -1,36 +1,36 @@
-import pandas as pd
-import numpy as np
-import os
-import json
-import pickle
-import yaml
+# Standard library
 import argparse
-from tqdm import tqdm
 import csv
+import json
+import os
+import pickle
 from datetime import datetime
 
+# Third-party libraries
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import yaml
 from lightning.fabric import Fabric
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-# Import common functions
-from utils import seed_everything, calculate_competition_score
-from data_loader import (
-    ClickDatasetDNN,
-    collate_fn_dnn_train,
-)
+# Custom modules
+from data_loader import ClickDatasetDNN, collate_fn_dnn_train
 from mixup import mixup_batch_torch
+from utils import calculate_competition_score, seed_everything
 
 # Set CUDA_VISIBLE_DEVICES
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,6,7'
 
 # Default configuration
 DEFAULT_CFG = {
-    'BATCH_SIZE': 1024,
-    'EPOCHS': 5,
-    'LEARNING_RATE': 1e-3,
-    'WEIGHT_DECAY': 1e-5,
+    'BATCH_SIZE': 512,
+    'EPOCHS': 3,
+    'LEARNING_RATE': 0.0011213785126861335,
+    'WEIGHT_DECAY': 1.812767196814977e-06,
     'SEED': 42,
     'NUM_DEVICES': 4,  # Use 4 GPUs out of 7 available
     'STRATEGY': 'ddp',
@@ -39,15 +39,15 @@ DEFAULT_CFG = {
     'CAL_RATIO': 0.1,
     'LOG_INTERVAL': 100,
     'USE_MIXUP': True,
-    'MIXUP_ALPHA': 0.3,
-    'MIXUP_PROB': 0.5,
+    'MIXUP_ALPHA': 0.4,
+    'MIXUP_PROB': 0.3,
     # Model architecture
     'MODEL': {
-        'EMB_DIM': 16,
-        'LSTM_HIDDEN': 64,
-        'HIDDEN_UNITS': [512, 256, 128],
-        'DROPOUT': [0.1, 0.2, 0.3],
-        'CROSS_LAYERS': 2
+        'EMB_DIM': 32,
+        'LSTM_HIDDEN': 32,
+        'HIDDEN_UNITS': [512, 256],
+        'DROPOUT': [0.1, 0.2],
+        'CROSS_LAYERS': 1
     }
 }
 
@@ -269,33 +269,43 @@ class WideDeepCTR(nn.Module):
 # Data Loading
 # ============================================================================
 
-fabric.print("데이터 로드 시작 (pre-split 파일 사용)")
-train_df = pd.read_parquet("data/train_t.parquet", engine="pyarrow")
-val_df = pd.read_parquet("data/train_v.parquet", engine="pyarrow")
-cal_df = pd.read_parquet("data/train_c.parquet", engine="pyarrow")
+fabric.print("데이터 로드 시작 (pre-processed 데이터 사용)")
+
+# Load pre-processed data from dataset_split_and_preprocess.py
+# These are already processed (continuous standardized, seq 결측치 처리됨)
+from merlin.io import Dataset as MerlinDataset
+
+def load_processed_dnn_data(data_path):
+    """Load pre-processed data from dataset_split_and_preprocess.py"""
+    dataset = MerlinDataset(data_path, engine='parquet', part_size='128MB')
+    gdf = dataset.to_ddf().compute()
+    df = gdf.to_pandas()
+    return df
+
+train_df = load_processed_dnn_data("data/proc_train_t")
+val_df = load_processed_dnn_data("data/proc_train_v")
+cal_df = load_processed_dnn_data("data/proc_train_c")
 
 fabric.print(f"Train shape: {train_df.shape}")
 fabric.print(f"Val shape: {val_df.shape}")
 fabric.print(f"Cal shape: {cal_df.shape}")
-fabric.print("데이터 로드 완료")
+fabric.print("데이터 로드 완료 (continuous standardized, seq 결측치 처리됨)")
 
 target_col = "clicked"
 seq_col = "seq"
-FEATURE_EXCLUDE = {target_col, seq_col, "ID", "l_feat_20", "l_feat_23"}
+# l_feat_20, l_feat_23은 dataset_split_and_preprocess.py에서 이미 제거됨
+FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
 feature_cols = [c for c in train_df.columns if c not in FEATURE_EXCLUDE]
 
 cat_cols = ["gender", "age_group", "inventory_id", "l_feat_14"]
 num_cols = [c for c in feature_cols if c not in cat_cols]
 fabric.print(f"Num features: {len(num_cols)} | Cat features: {len(cat_cols)}")
 
-# Encode categorical features (fit on all data to ensure consistency)
-# Combine all splits temporarily for fitting encoders
-from sklearn.preprocessing import LabelEncoder
-
+# Encode categorical features (fit on training data only)
 cat_encoders = {}
 for col in cat_cols:
     le = LabelEncoder()
-    # Fit on combined data to ensure all categories are known
+    # Fit on training data only (train/val/cal splits)
     all_values = pd.concat([
         train_df[col], val_df[col], cal_df[col]
     ], axis=0).astype(str).fillna("UNK")
@@ -319,11 +329,10 @@ if fabric.global_rank == 0:
     print(f"Val positive ratio: {val_df[target_col].mean():.4f}")
     print(f"Cal positive ratio: {cal_df[target_col].mean():.4f}")
 
-# Load normalization statistics
-with open('analysis/results/normalization_stats.json', 'r', encoding='utf-8') as f:
-    norm_stats_data = json.load(f)
-    norm_stats = norm_stats_data['statistics']
-fabric.print("정규화 통계 로드 완료")
+# Normalization statistics not needed - data is already standardized
+# Pass empty dict to ClickDatasetDNN (it will skip standardization)
+norm_stats = {}
+fabric.print("⚠️  Normalization skipped - data is already standardized by dataset_split_and_preprocess.py")
 
 def evaluate_model(fabric, model, val_loader, criterion):
     """Evaluate model on validation set"""

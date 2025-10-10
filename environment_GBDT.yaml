@@ -17,7 +17,7 @@ dependencies:
   - scikit-learn
   - pyarrow
   - xgboost
-  - catboost
+  - catboost==1.2.5
   - psutil
   - dask
   - pyyaml

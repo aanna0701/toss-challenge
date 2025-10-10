@@ -1,20 +1,16 @@
 # GBDT Configuration for TOSS Challenge
 # Supports both XGBoost and CatBoost models
 
-# Data paths
+# Data paths (pre-processed by dataset_split_and_preprocess.py)
 data:
-  train_t_path: "data/train_t.parquet"  # Training data (80%)
-  train_v_path: "data/train_v.parquet"  # Validation data (10%)
-  train_c_path: "data/train_c.parquet"  # Calibration data (10%)
+  train_t_path: "data/proc_train_t"  # Training data (80%, pre-processed)
+  train_v_path: "data/proc_train_v"  # Validation data (10%, pre-processed)
+  train_c_path: "data/proc_train_c"  # Calibration data (10%, pre-processed)
   temp_dir: "tmp"
 
 # Training settings
 training:
-  force_reprocess: false
-  use_mixup: false     # Enable MixUp data augmentation
-  mixup_alpha: 0.3     # Beta distribution parameter (0.3 recommended)
-  mixup_ratio: 0.5     # Ratio of MixUp samples to add (0.5 = add 50% more data)
-  # Note: Calibration is now performed during prediction (pred_gbdt.py automatically finds best method)
+  # Always process fresh data - no caching
 
 # Model selection (xgboost or catboost)
 model:
@@ -22,62 +18,64 @@ model:
 
 # XGBoost configuration
 xgboost:
+  # n_estimators: 186
+  # learning_rate: 0.2511367755155965
+  # max_depth: 19
+  # subsample: 0.8
+  # colsample_bytree: 0.9963115111382519
+  # tree_method: gpu_hist
+  # gpu_id: 0
+  # verbosity: 0
+  # early_stopping_rounds: 20
+  # seed: 42
+  # min_child_weight: 2.0
+  # gamma: 0.011655401502024312
+  # reg_alpha: 2.6271450275232193
+  # reg_lambda: 0.11457500170538186
+  # max_bin: 251
   n_estimators: 200
-  learning_rate: 0.1
+  early_stopping_rounds: 20
   max_depth: 8
+  learning_rate: 0.1
   subsample: 0.8
   colsample_bytree: 0.8
-  tree_method: "gpu_hist"
+  scale_pos_weight: null  # Set this value during runtime
   gpu_id: 0
   verbosity: 0
-  early_stopping_rounds: 20
-  random_state: 42
+  seed: 42
+  tree_method: gpu_hist
+  # MixUp augmentation settings
+  use_mixup: true
+  mixup_alpha: 0.6
+  mixup_ratio: 0.3
 
 # CatBoost configuration
 catboost:
-  n_estimators: 200
+  # Model parameters
+  iterations: 200
   learning_rate: 0.1
-  max_depth: 8
-  subsample: 0.8
+  depth: 8
+  subsample: 1
   colsample_bylevel: 0.8
   task_type: "GPU"
   devices: "0"
   verbose: false
   early_stopping_rounds: 20
   thread_count: -1
-  random_state: 42
+  random_seed: 42
   bootstrap_type: "Bernoulli"  # Required when using subsample
+  
+  # MixUp augmentation settings
+  use_mixup: false
+  mixup_alpha: 0.3
+  mixup_ratio: 0.5
 
 # Preset configurations
 presets:
-  xgboost_fast:
+  xgboost:
     model:
       name: "xgboost"
-    xgboost:
-      n_estimators: 100
-      learning_rate: 0.15
-      max_depth: 6
   
-  xgboost_deep:
-    model:
-      name: "xgboost"
-    xgboost:
-      n_estimators: 300
-      learning_rate: 0.05
-      max_depth: 10
-  
-  catboost_fast:
+  catboost:
     model:
       name: "catboost"
-    catboost:
-      n_estimators: 100
-      learning_rate: 0.15
-      max_depth: 6
-  
-  catboost_deep:
-    model:
-      name: "catboost"
-    catboost:
-      n_estimators: 300
-      learning_rate: 0.05
-      max_depth: 10
