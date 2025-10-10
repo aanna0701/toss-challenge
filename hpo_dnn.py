@@ -84,6 +84,35 @@ def clear_gpu_memory():
         print(f"⚠️ Error clearing GPU memory: {e}")
         gc.collect()
 
+# ============================================================================
+# Calibration Classes
+# ============================================================================
+
+class TemperatureScaling:
+    """Temperature scaling for calibration"""
+    def __init__(self):
+        self.temperature = 1.0
+    
+    def fit(self, logits, labels):
+        """Find optimal temperature using validation set"""
+        from scipy.optimize import minimize
+        
+        def nll_loss(temp):
+            scaled_logits = logits / temp
+            probs = 1 / (1 + np.exp(-scaled_logits))
+            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+            loss = -np.mean(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
+            return loss
+        
+        result = minimize(nll_loss, x0=1.0, bounds=[(0.1, 10.0)], method='L-BFGS-B')
+        self.temperature = result.x[0]
+    
+    def predict_proba(self, logits):
+        """Apply temperature scaling"""
+        scaled_logits = logits / self.temperature
+        probs = 1 / (1 + np.exp(-scaled_logits))
+        return probs
+
 class CrossNetwork(nn.Module):
     def __init__(self, input_dim, num_layers=2):
         super().__init__()
@@ -163,9 +192,9 @@ def get_categorical_cardinalities(train_df, val_df, cat_cols):
 def worker_init_fn(worker_id):
     os.sched_setaffinity(0, range(os.cpu_count()))
 
-def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col, 
-              cat_cardinalities, target_col, num_devices, use_mixup=True):
-    """Optuna objective function for DNN with Fabric
+def objective(trial, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, 
+              cat_cardinalities, target_col, num_devices):
+    """Optuna objective function for DNN with Fabric and Calibration
     
     Note: For Optuna compatibility, we use single-process execution.
     Each trial runs on a single GPU (or uses DataParallel on multiple GPUs).
@@ -194,13 +223,17 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col,
     lstm_hidden = trial.suggest_categorical('lstm_hidden', [32, 64])
     cross_layers = trial.suggest_int('cross_layers', 1, 3)
     
-    # MixUp hyperparameters (if enabled)
+    # MixUp - search whether to use it or not
+    use_mixup = trial.suggest_categorical('use_mixup', [True, False])
     if use_mixup:
         mixup_alpha = trial.suggest_float('mixup_alpha', 0.1, 0.5, step=0.1)
         mixup_prob = trial.suggest_float('mixup_prob', 0.3, 0.7, step=0.1)
     else:
         mixup_alpha = 0.0
         mixup_prob = 0.0
+    
+    # Calibration method
+    calibration_method = trial.suggest_categorical('calibration_method', ['none', 'temperature', 'sigmoid'])
     
     # MLP architecture
     n_layers = trial.suggest_int('n_layers', 2, 4)
@@ -220,9 +253,11 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col,
     print(f"   n_layers: {n_layers}")
     print(f"   hidden_units: {hidden_units}")
     print(f"   dropout_rates: {dropout_rates}")
+    print(f"   use_mixup: {use_mixup}")
     if use_mixup:
         print(f"   mixup_alpha: {mixup_alpha:.3f}")
         print(f"   mixup_prob: {mixup_prob:.3f}")
+    print(f"   calibration_method: {calibration_method}")
     
     # Create datasets (data already preprocessed by dataset_split_and_preprocess.py)
     train_dataset = ClickDatasetDNN(train_df, num_cols, cat_cols, seq_col, target_col, True)
@@ -308,12 +343,12 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col,
     
     avg_train_loss = train_loss / train_samples
     
-    # Get predictions on validation and calibration sets
+    # Get predictions on validation set
     model.eval()
     
-    # Validation predictions
+    # Validation predictions (collect logits for calibration)
     val_loss = 0
-    val_preds = []
+    val_logits = []
     val_targets = []
     
     with torch.no_grad():
@@ -324,16 +359,82 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col,
             loss = criterion(logits, ys)
             val_loss += loss.item() * ys.size(0)
             
-            preds = torch.sigmoid(logits).cpu().numpy()
-            val_preds.extend(preds)
+            val_logits.extend(logits.cpu().numpy())
             val_targets.extend(ys.cpu().numpy())
     
     val_loss = val_loss / len(val_targets)
-    val_preds = np.array(val_preds)
+    val_logits = np.array(val_logits)
     val_targets = np.array(val_targets)
     
-    # Calculate score on validation set
-    score, ap, wll = calculate_competition_score(val_targets, val_preds)
+    # Apply calibration if needed
+    if calibration_method != 'none':
+        # Create calibration dataset and loader
+        cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, target_col, True)
+        cal_loader = DataLoader(cal_dataset, batch_size=batch_size, shuffle=False,
+                                collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4,
+                                worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=8)
+        cal_loader = fabric.setup_dataloaders(cal_loader)
+        
+        # Get predictions on calibration data
+        cal_logits = []
+        cal_targets = []
+        
+        with torch.no_grad():
+            cal_pbar = tqdm(cal_loader, desc=f"Trial {trial.number} Calibration", leave=False)
+            for num_x, cat_x, seqs, lens, ys in cal_pbar:
+                logits = model(num_x, cat_x, seqs, lens)
+                cal_logits.extend(logits.cpu().numpy())
+                cal_targets.extend(ys.cpu().numpy())
+        
+        cal_logits = np.array(cal_logits)
+        cal_targets = np.array(cal_targets)
+        
+        # Balance calibration data: downsample negatives to match positives
+        pos_idx = np.where(cal_targets == 1)[0]
+        neg_idx = np.where(cal_targets == 0)[0]
+        n_pos = len(pos_idx)
+        
+        # Randomly sample negatives to match positive count
+        rng = np.random.default_rng(42)
+        neg_sampled_idx = rng.choice(neg_idx, size=min(n_pos, len(neg_idx)), replace=False)
+        
+        # Combine indices
+        balanced_idx = np.concatenate([pos_idx, neg_sampled_idx])
+        rng.shuffle(balanced_idx)
+        
+        # Create balanced calibration set
+        cal_logits_balanced = cal_logits[balanced_idx]
+        cal_targets_balanced = cal_targets[balanced_idx]
+        
+        if calibration_method == 'temperature':
+            # Fit temperature scaling on balanced calibration set
+            calibrator = TemperatureScaling()
+            calibrator.fit(cal_logits_balanced, cal_targets_balanced)
+            
+            # Apply to validation set
+            val_preds = calibrator.predict_proba(val_logits)
+            
+        else:  # sigmoid
+            from sklearn.linear_model import LogisticRegression
+            # Convert logits to probabilities for sigmoid calibration
+            cal_probs_balanced = 1 / (1 + np.exp(-cal_logits_balanced))
+            
+            # Fit logistic regression on balanced calibration set
+            calibrator = LogisticRegression()
+            calibrator.fit(cal_probs_balanced.reshape(-1, 1), cal_targets_balanced)
+            
+            # Apply to validation set
+            val_probs = 1 / (1 + np.exp(-val_logits))
+            val_preds = calibrator.predict_proba(val_probs.reshape(-1, 1))[:, 1]
+        
+        # Calculate score with calibration
+        score, ap, wll = calculate_competition_score(val_targets, val_preds)
+        
+        del cal_dataset, cal_loader, calibrator
+    else:
+        # No calibration - use sigmoid on logits directly
+        val_preds = 1 / (1 + np.exp(-val_logits))
+        score, ap, wll = calculate_competition_score(val_targets, val_preds)
     
     # Print results
     print(f"Trial {trial.number} - "
@@ -349,13 +450,12 @@ def objective(trial, train_df, val_df, num_cols, cat_cols, seq_col,
     
     return score
 
-def run_optimization(train_t_path, train_v_path, n_trials=50,
-                     timeout=None, seed=42, use_mixup=True, num_devices=None):
-    """Run Optuna optimization using pre-split data with Fabric DDP"""
+def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=50,
+                     timeout=None, seed=42, num_devices=None):
+    """Run Optuna optimization using pre-split data with Fabric DDP and Calibration"""
     print("\n" + "="*70)
     print("🔍 DNN (WideDeepCTR) Hyperparameter Optimization with Optuna + Fabric DDP")
     print("="*70)
-    print(f"   MixUp enabled: {use_mixup}")
     
     # Set seed
     seed_everything(seed)
@@ -387,6 +487,10 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
     val_df = load_processed_dnn_data(train_v_path)
     print(f"   ✅ Loaded {len(val_df):,} rows x {len(val_df.columns)} columns")
     
+    print(f"\n📦 Loading calibration data from {train_c_path}...")
+    cal_df = load_processed_dnn_data(train_c_path)
+    print(f"   ✅ Loaded {len(cal_df):,} rows x {len(cal_df.columns)} columns")
+    
     # Define features
     target_col = "clicked"
     seq_col = "seq"
@@ -410,12 +514,20 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
     print("      - Numerical: Normalized (mean=0, std=1)")
     print("      - Missing values: Filled with 0")
     
+    # Calculate balanced calibration set info
+    n_cal_pos = int(cal_df[target_col].sum())
+    n_cal_neg = len(cal_df) - n_cal_pos
+    n_cal_balanced = min(n_cal_pos, n_cal_neg) * 2  # positive + sampled negative
+    
     print("\n📊 Optimization settings:")
     print(f"   Trials: {n_trials}")
     print(f"   Train samples: {len(train_df):,}")
     print(f"   Val samples: {len(val_df):,}")
+    print(f"   Cal samples (original): {len(cal_df):,} (pos: {n_cal_pos:,}, neg: {n_cal_neg:,})")
+    print(f"   Cal samples (balanced): {n_cal_balanced:,} (pos: {min(n_cal_pos, n_cal_neg):,}, neg: {min(n_cal_pos, n_cal_neg):,})")
     print(f"   Train positive ratio: {train_df[target_col].mean():.4f}")
     print(f"   Val positive ratio: {val_df[target_col].mean():.4f}")
+    print(f"   Cal positive ratio (original): {cal_df[target_col].mean():.4f}")
     if timeout:
         print(f"   Timeout: {timeout}s")
     else:
@@ -434,8 +546,8 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
     # Optimize
     study.optimize(
         lambda trial: objective(
-            trial, train_df, val_df, num_cols, cat_cols, seq_col, 
-            cat_cardinalities, target_col, num_devices, use_mixup
+            trial, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, 
+            cat_cardinalities, target_col, num_devices
         ),
         n_trials=n_trials,
         timeout=timeout,
@@ -458,7 +570,7 @@ def run_optimization(train_t_path, train_v_path, n_trials=50,
         print(f"   {key}: {value}")
     
     # Cleanup
-    del train_df, val_df
+    del train_df, val_df, cal_df
     clear_gpu_memory()
     
     return study
@@ -499,11 +611,20 @@ def save_best_params_to_yaml(study, output_path='config_widedeep_optimized.yaml'
     else:
         config['MODEL']['WIDEDEEP']['CROSS_LAYERS'] = best_params.get('cross_layers', 2)
     
+    # Add use_mixup flag
+    if 'use_mixup' in best_params:
+        config['MODEL']['WIDEDEEP']['USE_MIXUP'] = best_params['use_mixup']
+    
     # Add MixUp parameters if present
     if 'mixup_alpha' in best_params:
         config['MODEL']['WIDEDEEP']['MIXUP_ALPHA'] = best_params['mixup_alpha']
     if 'mixup_prob' in best_params:
         config['MODEL']['WIDEDEEP']['MIXUP_PROB'] = best_params['mixup_prob']
+    
+    # Add calibration method
+    if 'calibration_method' in best_params:
+        config['MODEL']['WIDEDEEP']['CALIBRATION_METHOD'] = best_params['calibration_method']
+        print(f"   Best calibration method: {best_params['calibration_method']}")
     
     # Save
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -529,16 +650,14 @@ def main():
                         help='Path to training data (default: data/proc_train_hpo)')
     parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
                         help='Path to validation data (default: data/proc_train_v)')
+    parser.add_argument('--train-c-path', type=str, default='data/proc_train_c',
+                        help='Path to calibration data (default: data/proc_train_c)')
     parser.add_argument('--n-trials', type=int, default=50,
                         help='Number of optimization trials (default: 50)')
     parser.add_argument('--timeout', type=int, default=None,
                         help='Timeout in seconds (default: None)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
-    parser.add_argument('--use-mixup', action='store_true', default=True,
-                        help='Enable MixUp data augmentation (default: True)')
-    parser.add_argument('--no-mixup', dest='use_mixup', action='store_false',
-                        help='Disable MixUp data augmentation')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
                         help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_widedeep.yaml',
@@ -558,9 +677,9 @@ def main():
     print("\n🔧 HPO Configuration:")
     print(f"   Train data: {args.train_t_path}")
     print(f"   Val data: {args.train_v_path}")
+    print(f"   Cal data: {args.train_c_path}")
     print(f"   Trials: {args.n_trials}")
     print(f"   Seed: {args.seed}")
-    print(f"   Use MixUp: {args.use_mixup}")
     if args.timeout:
         print(f"   Timeout: {args.timeout}s")
     else:
@@ -570,10 +689,10 @@ def main():
     study = run_optimization(
         train_t_path=args.train_t_path,
         train_v_path=args.train_v_path,
+        train_c_path=args.train_c_path,
         n_trials=args.n_trials,
         timeout=args.timeout,
         seed=args.seed,
-        use_mixup=args.use_mixup,
         num_devices=args.num_devices
     )
     

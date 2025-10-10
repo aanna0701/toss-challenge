@@ -89,45 +89,29 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal, ear
         'predictor': 'gpu_predictor',
         
         # GPU memory optimization
-        'max_bin': trial.suggest_int('max_bin', 128, 256),  # Reduced from 512
+        'max_bin': trial.suggest_int('max_bin', 128, 512),  # Reduced from 512
         'gpu_page_size': 4096,  # Smaller page size for memory efficiency
         
         # Hyperparameters to optimize
-        'max_depth': trial.suggest_int('max_depth', 3, 20),  # Reduced from 30
+        'max_depth': trial.suggest_int('max_depth', 3, 30),  # Reduced from 30
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),  # Start from 0.5
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 20),  # Reduced from 30
-        'gamma': trial.suggest_float('gamma', 0.0, 3.0),  # Reduced from 5
-        'reg_alpha': trial.suggest_float('reg_alpha', 0, 3),  # Reduced from 5
-        'reg_lambda': trial.suggest_float('reg_lambda', 0, 3),  # Reduced from 5
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 30),  # Reduced from 30
+        'gamma': trial.suggest_float('gamma', 0.0, 5),  # Reduced from 5
+        'reg_alpha': trial.suggest_float('reg_alpha', 0, 5),  # Reduced from 5
+        'reg_lambda': trial.suggest_float('reg_lambda', 0, 5),  # Reduced from 5
         'seed': 42,
         'scale_pos_weight': scale_pos_weight,
     }
     
-    n_estimators = trial.suggest_int('n_estimators', 50, 300)
+    n_estimators = trial.suggest_int('n_estimators', 50, 500)
     
     # Calibration method
     calibration_method = trial.suggest_categorical('calibration_method', ['none', 'temperature', 'sigmoid'])
     
-    # MixUp hyperparameters (if enabled)
-    if use_mixup:
-        mixup_alpha = trial.suggest_float('mixup_alpha', 0.1, 0.7, step=0.1)
-        mixup_ratio = trial.suggest_float('mixup_ratio', 0.1, 0.7, step=0.1)
-        
-        # Apply MixUp
-        class_weight = (1.0, scale_pos_weight)
-        X_train, y_train, sample_weight = apply_mixup_to_dataset(
-            X_train_orig, y_train_orig,
-            class_weight=class_weight,
-            alpha=mixup_alpha,
-            ratio=mixup_ratio,
-            rng=np.random.default_rng(42)
-        )
-    else:
-        X_train = X_train_orig
-        y_train = y_train_orig
-        sample_weight = None
-    
+    X_train = X_train_orig
+    y_train = y_train_orig
+    sample_weight = None
     # Train model with error handling and CPU fallback
     try:
         if sample_weight is not None:
@@ -391,8 +375,8 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
 def main():
     parser = argparse.ArgumentParser(description='XGBoost Hyperparameter Optimization')
     
-    parser.add_argument('--train-t-path', type=str, default='data/proc_train_hpo',
-                        help='Path to training data (default: data/proc_train_hpo)')
+    parser.add_argument('--train-t-path', type=str, default='data/proc_train_t',
+                        help='Path to training data (default: data/proc_train_t)')
     parser.add_argument('--train-v-path', type=str, default='data/proc_train_v',
                         help='Path to validation data (default: data/proc_train_v)')
     parser.add_argument('--train-c-path', type=str, default='data/proc_train_c',

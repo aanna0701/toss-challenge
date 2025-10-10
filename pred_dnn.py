@@ -128,14 +128,8 @@ def parse_args():
                         help='Directory containing trained model (e.g., result_dnn_ddp/20231201_120000)')
     parser.add_argument('--test-path', type=str, default='data/proc_test',
                         help='Path to preprocessed test data (default: data/proc_test)')
-    parser.add_argument('--cal-path', type=str, default='data/proc_train_c',
-                        help='Path to preprocessed calibration data (default: data/proc_train_c)')
     parser.add_argument('--output-path', type=str, default=None,
                         help='Path to save submission file (default: {model_dir}/submission.csv)')
-    parser.add_argument('--use-calibration', action='store_true', default=True,
-                        help='Use calibration model for predictions (default: True)')
-    parser.add_argument('--no-calibration', dest='use_calibration', action='store_false',
-                        help='Disable calibration')
     parser.add_argument('--batch-size', type=int, default=2048,
                         help='Batch size for inference (default: 2048)')
     parser.add_argument('--device', type=str, default='cuda',
@@ -144,7 +138,7 @@ def parse_args():
     return parser.parse_args()
 
 def load_model_and_metadata(model_dir, device='cuda'):
-    """Load model, encoders, and metadata"""
+    """Load model, encoders, calibrator, and metadata"""
     print(f"\n📦 Loading model from {model_dir}...")
     
     # Load metadata
@@ -157,15 +151,17 @@ def load_model_and_metadata(model_dir, device='cuda'):
     
     print(f"   Model: {metadata['model_name']}")
     print(f"   Validation Score: {metadata['val_score']:.6f}")
+    print(f"   Calibration method: {metadata.get('calibration_method', 'none')}")
     
-    # Load categorical encoders
+    # Load categorical encoders (if exists, may not exist for new preprocessing)
+    cat_encoders = None
     encoders_path = os.path.join(model_dir, 'cat_encoders.pkl')
-    if not os.path.exists(encoders_path):
-        raise FileNotFoundError(f"Categorical encoders not found: {encoders_path}")
-    
-    with open(encoders_path, 'rb') as f:
-        cat_encoders = pickle.load(f)
-    print("   ✅ Categorical encoders loaded")
+    if os.path.exists(encoders_path):
+        with open(encoders_path, 'rb') as f:
+            cat_encoders = pickle.load(f)
+        print("   ✅ Categorical encoders loaded")
+    else:
+        print("   ℹ️  No categorical encoders found (using preprocessed data)")
     
     # Find model file
     model_files = [f for f in os.listdir(model_dir) if f.startswith('dnn_') and f.endswith('.pt')]
@@ -188,9 +184,13 @@ def load_model_and_metadata(model_dir, device='cuda'):
     dropout = model_arch.get('dropout', [0.1, 0.2, 0.3])
     cross_layers = model_arch.get('cross_layers', 2)
     
+    # Convert cat_cardinalities from dict to list (based on cat_features order)
+    cat_features = metadata['cat_features']
+    cat_cardinalities_list = [cat_cardinalities[col] for col in cat_features]
+    
     model = WideDeepCTR(
         num_features=num_features,
-        cat_cardinalities=cat_cardinalities,
+        cat_cardinalities=cat_cardinalities_list,
         emb_dim=emb_dim,
         lstm_hidden=lstm_hidden,
         hidden_units=hidden_units,
@@ -206,7 +206,17 @@ def load_model_and_metadata(model_dir, device='cuda'):
     
     print("   ✅ Model loaded and ready for inference")
     
-    return model, cat_encoders, metadata
+    # Load calibrator if exists
+    calibrator = None
+    calibrator_path = os.path.join(model_dir, 'calibrator.pkl')
+    if os.path.exists(calibrator_path):
+        with open(calibrator_path, 'rb') as f:
+            calibrator = pickle.load(f)
+        print(f"   ✅ Calibrator loaded from {calibrator_path}")
+    else:
+        print("   ℹ️  No calibrator found (will use raw predictions)")
+    
+    return model, cat_encoders, calibrator, metadata
 
 def load_test_data(test_path, num_cols, cat_cols, seq_col, batch_size=2048):
     """Load preprocessed test data, return dataset and dataloader"""
@@ -227,155 +237,9 @@ def load_test_data(test_path, num_cols, cat_cols, seq_col, batch_size=2048):
     
     return test_dataset, test_loader
 
-def find_best_calibration(model, cal_path, cat_cols, num_cols, seq_col, target_col, device='cuda', batch_size=2048, test_ratio=0.5):
-    """
-    Find best calibration method by comparing all methods on calibration test set
-    
-    Returns:
-        best_method: Best calibration method name ('none', 'isotonic', 'sigmoid', or 'temperature')
-        best_calibrator: Fitted calibrator (or None if 'none' is best)
-        calibration_results: Dict of all results
-    """
-    print("\n" + "="*70)
-    print("🎯 Finding Best Calibration Method")
-    print("="*70)
-    
-    # Load preprocessed calibration data
-    print(f"\n📦 Loading preprocessed calibration data from {cal_path}...")
-    cal_df = load_processed_dnn_data(cal_path)
-    print(f"   ✅ Loaded {len(cal_df):,} samples with {len(cal_df.columns)} features")
-    
-    # Create dataset and dataloader (no normalization needed, already normalized)
-    cal_dataset = ClickDatasetDNN(cal_df, num_cols, cat_cols, seq_col, target_col=target_col, has_target=True)
-    cal_loader = DataLoader(cal_dataset, batch_size=batch_size, shuffle=False,
-                           collate_fn=collate_fn_dnn_train, pin_memory=True, num_workers=4)
-    
-    # Collect predictions on train_c
-    print("   Collecting predictions on train_c...")
-    model.eval()
-    cal_logits = []
-    cal_preds = []
-    cal_targets = []
-    
-    with torch.no_grad():
-        for num_x, cat_x, seqs, lens, ys in tqdm(cal_loader, desc="[train_c]", leave=False):
-            num_x = num_x.to(device)
-            cat_x = cat_x.to(device)
-            seqs = seqs.to(device)
-            lens = lens.to(device)
-            
-            logits = model(num_x, cat_x, seqs, lens)
-            preds = torch.sigmoid(logits)
-            
-            cal_logits.append(logits.cpu().numpy())
-            cal_preds.append(preds.cpu().numpy())
-            cal_targets.append(ys.numpy())
-    
-    cal_logits = np.concatenate(cal_logits)
-    cal_preds = np.concatenate(cal_preds)
-    cal_targets = np.concatenate(cal_targets)
-    
-    # Split train_c: balanced set for fitting, rest for testing
-    pos_idx = np.where(cal_targets == 1)[0]
-    neg_idx = np.where(cal_targets == 0)[0]
-    
-    print(f"   train_c total: {len(cal_targets):,} samples (pos: {len(pos_idx):,}, neg: {len(neg_idx):,})")
-    
-    # Sample balanced training set
-    np.random.seed(42)
-    n_pos_train = int(len(pos_idx) * test_ratio)
-    pos_train_idx = np.random.choice(pos_idx, size=n_pos_train, replace=False)
-    pos_test_idx = np.setdiff1d(pos_idx, pos_train_idx)
-    
-    neg_train_idx = np.random.choice(neg_idx, size=n_pos_train, replace=False)
-    neg_test_idx = np.setdiff1d(neg_idx, neg_train_idx)
-    
-    cal_train_idx = np.concatenate([pos_train_idx, neg_train_idx])
-    cal_test_idx = np.concatenate([pos_test_idx, neg_test_idx])
-    
-    np.random.shuffle(cal_train_idx)
-    np.random.shuffle(cal_test_idx)
-    
-    print(f"   → Calibration fit set: {len(cal_train_idx):,} samples (balanced, pos={len(pos_train_idx):,}, neg={len(neg_train_idx):,})")
-    print(f"   → Calibration test set: {len(cal_test_idx):,} samples (imbalanced, pos={len(pos_test_idx):,}, neg={len(neg_test_idx):,})")
-    
-    # Test all calibration methods
-    methods = ['none', 'isotonic', 'sigmoid', 'temperature']
-    results = {}
-    calibrators = {}
-    
-    print("\n🔬 Testing calibration methods...")
-    
-    for method in methods:
-        print(f"\n   [{method.upper()}]")
-        
-        if method == 'none':
-            # No calibration - use raw predictions
-            cal_test_calibrated = cal_preds[cal_test_idx]
-            calibrators[method] = None
-        else:
-            # Get training data for calibration
-            cal_train_logits = cal_logits[cal_train_idx]
-            cal_train_preds = cal_preds[cal_train_idx]
-            cal_train_targets = cal_targets[cal_train_idx]
-            
-            # Fit calibrator
-            if method == 'temperature':
-                calibrator = TemperatureScaling()
-                calibrator.fit(cal_train_logits, cal_train_targets)
-                
-                # Apply to test set
-                cal_test_calibrated = calibrator.predict_proba(cal_logits[cal_test_idx])
-                
-            elif method == 'isotonic':
-                calibrator = IsotonicRegression(out_of_bounds='clip')
-                calibrator.fit(cal_train_preds, cal_train_targets)
-                
-                cal_test_calibrated = calibrator.predict(cal_preds[cal_test_idx])
-                
-            else:  # sigmoid
-                calibrator = LogisticRegression()
-                calibrator.fit(cal_train_preds.reshape(-1, 1), cal_train_targets)
-                
-                cal_test_calibrated = calibrator.predict_proba(cal_preds[cal_test_idx].reshape(-1, 1))[:, 1]
-            
-            calibrators[method] = calibrator
-        
-        # Evaluate on calibration test set
-        cal_test_targets = cal_targets[cal_test_idx]
-        score, ap, wll = calculate_competition_score(cal_test_targets, cal_test_calibrated)
-        
-        # Store results
-        results[method] = {
-            'score': score,
-            'ap': ap,
-            'wll': wll
-        }
-        
-        print(f"      Score: {score:.6f}, AP: {ap:.6f}, WLL: {wll:.6f}")
-    
-    # Find best method based on calibration test score
-    best_method = max(results.keys(), key=lambda m: results[m]['score'])
-    best_score = results[best_method]['score']
-    
-    print(f"\n🏆 Best Method: {best_method.upper()}")
-    print(f"   Score: {best_score:.6f}")
-    print(f"   AP: {results[best_method]['ap']:.6f}")
-    print(f"   WLL: {results[best_method]['wll']:.6f}")
-    
-    # Compare with no calibration
-    if best_method != 'none':
-        improvement = best_score - results['none']['score']
-        print(f"   Improvement over raw: {improvement:+.6f}")
-    
-    print("="*70)
-    
-    return best_method, calibrators[best_method], results
-
-def predict_and_save(model, best_method, best_calibrator, test_dataset, test_loader, output_path, device='cuda'):
+def predict_and_save(model, calibrator, calibration_method, test_dataset, test_loader, output_path, device='cuda'):
     """Generate predictions and save submission file"""
     print("\n🔮 Predicting on test data...")
-    print(f"   Using calibration method: {best_method.upper()}")
     
     # Run inference
     all_logits = []
@@ -400,16 +264,19 @@ def predict_and_save(model, best_method, best_calibrator, test_dataset, test_loa
     
     print(f"   Raw prediction range: [{all_preds.min():.6f}, {all_preds.max():.6f}]")
     
-    # Apply calibration if needed
-    if best_method != 'none' and best_calibrator is not None:
-        print(f"   Applying {best_method} calibration...")
+    # Apply calibration if calibrator exists
+    if calibrator is not None:
+        print(f"   Applying {calibration_method} calibration...")
         
-        if best_method == 'temperature':
-            all_preds = best_calibrator.predict_proba(all_logits)
-        elif best_method == 'isotonic':
-            all_preds = best_calibrator.predict(all_preds)
-        else:  # sigmoid
-            all_preds = best_calibrator.predict_proba(all_preds.reshape(-1, 1))[:, 1]
+        if calibration_method == 'temperature':
+            all_preds = calibrator.predict_proba(all_logits)
+        elif calibration_method == 'isotonic':
+            all_preds = calibrator.predict(all_preds)
+        elif calibration_method == 'sigmoid':
+            all_preds = calibrator.predict_proba(all_preds.reshape(-1, 1))[:, 1]
+        else:
+            print(f"   ⚠️  Unknown calibration method: {calibration_method}")
+            print("   Using raw predictions")
         
         print(f"   Calibrated prediction range: [{all_preds.min():.6f}, {all_preds.max():.6f}]")
     else:
@@ -439,8 +306,6 @@ def main():
     print("="*70)
     print(f"   Model directory: {args.model_dir}")
     print(f"   Test data: {args.test_path}")
-    print(f"   Calibration data: {args.cal_path}")
-    print(f"   Use calibration: {args.use_calibration}")
     print(f"   Batch size: {args.batch_size}")
     print(f"   Device: {args.device}")
     
@@ -451,9 +316,6 @@ def main():
     if not os.path.exists(args.test_path):
         raise FileNotFoundError(f"Test data not found: {args.test_path}")
     
-    if args.use_calibration and not os.path.exists(args.cal_path):
-        raise FileNotFoundError(f"Calibration data not found: {args.cal_path}")
-    
     # Set output path
     if args.output_path is None:
         args.output_path = os.path.join(args.model_dir, 'submission.csv')
@@ -463,8 +325,9 @@ def main():
         print("   ⚠️ CUDA not available, using CPU")
         args.device = 'cpu'
     
-    # Load model and metadata
-    model, _, metadata = load_model_and_metadata(args.model_dir, device=args.device)
+    # Load model, calibrator, and metadata
+    model, _, calibrator, metadata = load_model_and_metadata(args.model_dir, device=args.device)
+    calibration_method = metadata.get('calibration_method', 'none')
     
     # Define feature columns
     cat_cols = metadata['cat_features']
@@ -481,19 +344,6 @@ def main():
     
     print(f"\n📊 Features: Num={len(num_cols)} | Cat={len(cat_cols)}")
     
-    # Find best calibration method if enabled
-    best_method = 'none'
-    best_calibrator = None
-    
-    if args.use_calibration:
-        # Find best calibration method using preprocessed calibration data
-        best_method, best_calibrator, _ = find_best_calibration(
-            model, args.cal_path, cat_cols, num_cols, seq_col, target_col,
-            device=args.device, batch_size=args.batch_size
-        )
-    else:
-        print("\n⚠️  Calibration disabled by user (--no-calibration)")
-    
     # Load preprocessed test data with dataset and dataloader
     test_dataset, test_loader = load_test_data(
         args.test_path, num_cols, cat_cols, seq_col, 
@@ -503,8 +353,8 @@ def main():
     # Predict and save
     predict_and_save(
         model,
-        best_method,
-        best_calibrator,
+        calibrator,
+        calibration_method,
         test_dataset,
         test_loader,
         args.output_path,

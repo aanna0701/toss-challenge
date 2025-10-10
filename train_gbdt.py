@@ -88,6 +88,7 @@ elif all_good:
 # Standard library
 import argparse
 import json
+import pickle
 import shutil
 import time
 import yaml
@@ -119,10 +120,42 @@ cp.cuda.Device(0).use()
 # ML libraries
 import catboost as cb
 import xgboost as xgb
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 # Custom modules
 from mixup import apply_mixup_to_dataset
 from utils import calculate_competition_score, clear_gpu_memory, print_memory
+
+# ============================================================================
+# Calibration Classes
+# ============================================================================
+
+class TemperatureScaling:
+    """Temperature scaling for calibration"""
+    def __init__(self):
+        self.temperature = 1.0
+    
+    def fit(self, logits, labels):
+        """Find optimal temperature using validation set"""
+        from scipy.optimize import minimize
+        
+        def nll_loss(temp):
+            scaled_logits = logits / temp
+            probs = 1 / (1 + np.exp(-scaled_logits))
+            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+            loss = -np.mean(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
+            return loss
+        
+        result = minimize(nll_loss, x0=1.0, bounds=[(0.1, 10.0)], method='L-BFGS-B')
+        self.temperature = result.x[0]
+        print(f"      Optimal temperature: {self.temperature:.4f}")
+    
+    def predict_proba(self, logits):
+        """Apply temperature scaling"""
+        scaled_logits = logits / self.temperature
+        probs = 1 / (1 + np.exp(-scaled_logits))
+        return probs
 
 @dataclass
 class GBDTConfig:
@@ -137,6 +170,7 @@ class GBDTConfig:
     use_mixup: bool = False
     mixup_alpha: float = 0.3
     mixup_ratio: float = 0.5
+    calibration_method: str = 'none'
 
 def load_yaml_config(config_path: str = 'config_GBDT.yaml') -> Dict[str, Any]:
     """Load configuration from YAML file"""
@@ -191,7 +225,10 @@ def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str =
     mixup_alpha = model_config_full.pop('mixup_alpha', 0.3)
     mixup_ratio = model_config_full.pop('mixup_ratio', 0.5)
     
-    # Prepare model parameters (MixUp settings removed)
+    # Extract calibration method from model config
+    calibration_method = model_config_full.pop('calibration_method', 'none')
+    
+    # Prepare model parameters (MixUp settings and calibration method removed)
     model_params = model_config_full
     
     if final_model_name == 'xgboost':
@@ -214,7 +251,8 @@ def create_config_from_yaml(config_path: str = 'config_GBDT.yaml', preset: str =
         model_params=model_params,
         use_mixup=use_mixup,
         mixup_alpha=mixup_alpha,
-        mixup_ratio=mixup_ratio
+        mixup_ratio=mixup_ratio,
+        calibration_method=calibration_method
     )
 
 def _deep_update(base_dict: Dict, update_dict: Dict) -> None:
@@ -231,12 +269,13 @@ def print_config(config: GBDTConfig):
     print(f"   Model: {config.model_name}")
     print(f"   Train data: {config.train_t_path}")
     print(f"   Val data: {config.train_v_path}")
+    print(f"   Calibration data: {config.train_c_path}")
     print(f"   Output: {config.output_dir}")
     print(f"   MixUp enabled: {config.use_mixup}")
     if config.use_mixup:
         print(f"   MixUp alpha: {config.mixup_alpha}")
         print(f"   MixUp ratio: {config.mixup_ratio}")
-    print(f"   Note: Calibration will be performed during prediction")
+    print(f"   Calibration method: {config.calibration_method}")
 
     print("\n🔧 Model Parameters:")
     for key, value in config.model_params.items():
@@ -281,8 +320,9 @@ def run_train():
     print("\n" + "="*70)
     print("🔄 Loading Pre-Processed Data")
     print("="*70)
-    print(f"   Train: {CONFIG.train_t_path}")
-    print(f"   Val: {CONFIG.train_v_path}")
+    print(f"   Train T: {CONFIG.train_t_path}")
+    print(f"   Train V: {CONFIG.train_v_path}")
+    print(f"   Train C: {CONFIG.train_c_path}")
     print(f"   ⚡ Using pre-processed data (fast loading)")
 
     start_load = time.time()
@@ -290,23 +330,109 @@ def run_train():
     # Import the same function HPO uses
     from data_loader import load_processed_data_gbdt
     
-    # Load TRAIN data (pre-processed, seq column automatically excluded)
-    print("\n📦 Loading train data...")
-    X_train, y_train = load_processed_data_gbdt(CONFIG.train_t_path)
-    print(f"   Train shape: {X_train.shape}")
-    print(f"   Train positive ratio: {y_train.mean():.6f}")
+    # Load TRAIN_T data
+    print("\n📦 Loading train_t data...")
+    X_train_t, y_train_t = load_processed_data_gbdt(CONFIG.train_t_path)
+    print(f"   Train_t shape: {X_train_t.shape}")
+    print(f"   Train_t positive ratio: {y_train_t.mean():.6f}")
     
     clear_gpu_memory()
 
-    # Load VAL data (pre-processed, seq column automatically excluded)
-    print("\n📦 Loading val data...")
-    X_val, y_val = load_processed_data_gbdt(CONFIG.train_v_path)
-    print(f"   Val shape: {X_val.shape}")
-    print(f"   Val positive ratio: {y_val.mean():.6f}")
+    # Load TRAIN_V data
+    print("\n📦 Loading train_v data...")
+    X_train_v, y_train_v = load_processed_data_gbdt(CONFIG.train_v_path)
+    print(f"   Train_v shape: {X_train_v.shape}")
+    print(f"   Train_v positive ratio: {y_train_v.mean():.6f}")
+    
+    clear_gpu_memory()
+
+    # Load TRAIN_C data
+    print("\n📦 Loading train_c data...")
+    X_train_c, y_train_c = load_processed_data_gbdt(CONFIG.train_c_path)
+    print(f"   Train_c shape: {X_train_c.shape}")
+    print(f"   Train_c positive ratio: {y_train_c.mean():.6f}")
     
     clear_gpu_memory()
 
     print(f"\n⏱️  Loading time: {time.time() - start_load:.1f}s")
+    print_memory()
+    
+    # ========================================================================
+    # Split train_c into calibration set and additional training set
+    # ========================================================================
+    print("\n" + "="*70)
+    print("🔀 Splitting train_c for Calibration")
+    print("="*70)
+    
+    pos_idx = np.where(y_train_c == 1)[0]
+    neg_idx = np.where(y_train_c == 0)[0]
+    
+    print(f"   train_c total: {len(y_train_c):,} samples")
+    print(f"   Positive: {len(pos_idx):,}, Negative: {len(neg_idx):,}")
+    
+    # Sample half of positive samples for calibration
+    np.random.seed(42)
+    n_pos_cal = len(pos_idx) // 2
+    pos_cal_idx = np.random.choice(pos_idx, size=n_pos_cal, replace=False)
+    pos_train_idx = np.setdiff1d(pos_idx, pos_cal_idx)
+    
+    # Sample same number of negative samples for calibration
+    neg_cal_idx = np.random.choice(neg_idx, size=n_pos_cal, replace=False)
+    neg_train_idx = np.setdiff1d(neg_idx, neg_cal_idx)
+    
+    cal_idx = np.concatenate([pos_cal_idx, neg_cal_idx])
+    train_c_remaining_idx = np.concatenate([pos_train_idx, neg_train_idx])
+    
+    np.random.shuffle(cal_idx)
+    np.random.shuffle(train_c_remaining_idx)
+    
+    # Create calibration set
+    X_cal = X_train_c[cal_idx]
+    y_cal = y_train_c[cal_idx]
+    
+    # Create remaining train_c for training
+    X_train_c_remaining = X_train_c[train_c_remaining_idx]
+    y_train_c_remaining = y_train_c[train_c_remaining_idx]
+    
+    print(f"\n   → Calibration set: {len(cal_idx):,} samples")
+    print(f"      Positive: {len(pos_cal_idx):,}, Negative: {len(neg_cal_idx):,}")
+    print(f"      Positive ratio: {y_cal.mean():.6f}")
+    
+    print(f"\n   → Remaining train_c: {len(train_c_remaining_idx):,} samples")
+    print(f"      Positive: {len(pos_train_idx):,}, Negative: {len(neg_train_idx):,}")
+    print(f"      Positive ratio: {y_train_c_remaining.mean():.6f}")
+    
+    # Cleanup original train_c
+    del X_train_c, y_train_c
+    clear_gpu_memory()
+    
+    # ========================================================================
+    # Combine train_t + train_v + remaining train_c for full training
+    # ========================================================================
+    print("\n" + "="*70)
+    print("🔗 Combining Training Data")
+    print("="*70)
+    
+    X_train = np.vstack([X_train_t, X_train_v, X_train_c_remaining])
+    y_train = np.concatenate([y_train_t, y_train_v, y_train_c_remaining])
+    
+    print(f"   Combined training set: {X_train.shape[0]:,} samples")
+    print(f"      From train_t: {len(X_train_t):,}")
+    print(f"      From train_v: {len(X_train_v):,}")
+    print(f"      From train_c: {len(X_train_c_remaining):,}")
+    print(f"   Combined positive ratio: {y_train.mean():.6f}")
+    
+    # Cleanup individual datasets
+    del X_train_t, y_train_t, X_train_v, y_train_v, X_train_c_remaining, y_train_c_remaining
+    clear_gpu_memory()
+    
+    # Use train_v as validation set (we're using all data for training, but need eval set for early stopping)
+    # Actually, let's use calibration set as validation for early stopping
+    X_val = X_cal
+    y_val = y_cal
+    
+    print(f"   Using calibration set as validation for early stopping")
+    print(f"   Val shape: {X_val.shape}")
     print_memory()
 
     # Class distribution
@@ -416,12 +542,66 @@ def run_train():
     # Validation results
     score, ap, wll = calculate_competition_score(y_val, y_pred)
 
-    print("\n📊 Validation Results:")
+    print("\n📊 Validation Results (on calibration set):")
     print(f"   Score: {score:.6f}")
     print(f"   AP: {ap:.6f}")
     print(f"   WLL: {wll:.6f}")
     print(f"   Best iteration: {best_iteration}")
     print(f"   Training time: {time.time() - train_start:.1f}s")
+    
+    # ========================================================================
+    # Train Calibrator
+    # ========================================================================
+    print("\n" + "="*70)
+    print("🎯 Training Calibrator")
+    print("="*70)
+    print(f"   Method: {CONFIG.calibration_method}")
+    
+    calibrator = None
+    calibrated_preds = y_pred  # Default to raw predictions
+    
+    if CONFIG.calibration_method != 'none':
+        print(f"   Fitting {CONFIG.calibration_method} calibrator on calibration set...")
+        
+        if CONFIG.calibration_method == 'temperature':
+            # Convert probabilities to logits
+            cal_preds_clipped = np.clip(y_pred, 1e-7, 1 - 1e-7)
+            logits = np.log(cal_preds_clipped / (1 - cal_preds_clipped))
+            
+            calibrator = TemperatureScaling()
+            calibrator.fit(logits, y_val)
+            
+            # Apply calibration
+            calibrated_preds = calibrator.predict_proba(logits)
+            
+        elif CONFIG.calibration_method == 'isotonic':
+            calibrator = IsotonicRegression(out_of_bounds='clip')
+            calibrator.fit(y_pred, y_val)
+            
+            calibrated_preds = calibrator.predict(y_pred)
+            
+        elif CONFIG.calibration_method == 'sigmoid':
+            calibrator = LogisticRegression()
+            calibrator.fit(y_pred.reshape(-1, 1), y_val)
+            
+            calibrated_preds = calibrator.predict_proba(y_pred.reshape(-1, 1))[:, 1]
+        
+        else:
+            print(f"   ⚠️  Unknown calibration method: {CONFIG.calibration_method}")
+            print("   Using raw predictions (no calibration)")
+        
+        # Evaluate calibrated predictions
+        if calibrator is not None:
+            cal_score, cal_ap, cal_wll = calculate_competition_score(y_val, calibrated_preds)
+            
+            print(f"\n   📊 Calibrated Results:")
+            print(f"      Score: {cal_score:.6f} (raw: {score:.6f}, Δ: {cal_score - score:+.6f})")
+            print(f"      AP: {cal_ap:.6f} (raw: {ap:.6f}, Δ: {cal_ap - ap:+.6f})")
+            print(f"      WLL: {cal_wll:.6f} (raw: {wll:.6f}, Δ: {cal_wll - wll:+.6f})")
+    else:
+        print("   No calibration method specified (using raw predictions)")
+    
+    print("="*70)
     
     # Create timestamped subdirectory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -440,6 +620,13 @@ def run_train():
         model.save_model(model_path)
     print(f"   ✅ Model saved to {model_path}")
     
+    # Save calibrator if exists
+    if calibrator is not None:
+        calibrator_path = os.path.join(save_dir, 'calibrator.pkl')
+        with open(calibrator_path, 'wb') as f:
+            pickle.dump(calibrator, f)
+        print(f"   ✅ Calibrator saved to {calibrator_path}")
+    
     # Save metadata
     metadata = {
         'model_name': CONFIG.model_name,
@@ -449,13 +636,15 @@ def run_train():
         'best_iteration': int(best_iteration) if best_iteration else None,
         'train_samples': len(y_train) if not CONFIG.use_mixup else original_train_size,
         'val_samples': len(y_val),
+        'cal_samples': len(y_cal),
         'use_mixup': CONFIG.use_mixup,
         'mixup_alpha': CONFIG.mixup_alpha if CONFIG.use_mixup else None,
         'mixup_ratio': CONFIG.mixup_ratio if CONFIG.use_mixup else None,
+        'calibration_method': CONFIG.calibration_method,
         'timestamp': timestamp,
         'model_params': CONFIG.model_params,
-        'processing_method': 'hpo_compatible_independent',  # HPO-compatible independent processing
-        'data_source': 'raw_parquet_with_independent_workflow'  # Each split processed independently
+        'processing_method': 'full_train_with_calibration',  # train_t + train_v + remaining train_c
+        'data_source': 'combined_all_data_with_calibration_split'  # All data used with calibration
     }
     
     metadata_path = os.path.join(save_dir, 'metadata.json')
@@ -465,13 +654,15 @@ def run_train():
 
     # Cleanup
     print("\n🧹 Cleaning up memory...")
-    del X_train, y_train, X_val, y_val, model, y_pred
+    del X_train, y_train, X_val, y_val, X_cal, y_cal, model, y_pred
     if sample_weight_train is not None:
         del sample_weight_train
     if dtrain is not None:
         del dtrain
     if dval is not None:
         del dval
+    if calibrator is not None:
+        del calibrator
     clear_gpu_memory()
     print("   ✅ Memory cleaned")
 
@@ -489,11 +680,12 @@ if val_score:
     print(f"✅ Validation AP: {val_ap:.6f}")
     print(f"✅ Validation WLL: {val_wll:.6f}")
     print(f"✅ Model used: {CONFIG.model_name}")
+    print(f"✅ Calibration method: {CONFIG.calibration_method}")
     print(f"✅ Models saved to: {save_dir}")
-    print("✅ HPO-Compatible Processing: Each split processed independently")
+    print("✅ Training data: train_t + train_v + train_c (remaining)")
+    print("✅ Calibration data: train_c (balanced subset)")
     print("✅ GBDT-optimized preprocessing (no normalization)")
-    print(f"✅ Data source: {CONFIG.train_t_path}, {CONFIG.train_v_path}")
-    print(f"✅ Identical behavior to hpo_xgboost.py for consistency")
+    print(f"✅ Data source: {CONFIG.train_t_path}, {CONFIG.train_v_path}, {CONFIG.train_c_path}")
     print("="*70)
 else:
     print("\n⚠️ Training did not complete. Please check for errors above.")
@@ -506,7 +698,7 @@ print("\n🧹 Final cleanup...")
 print("   Temporary files are managed by data_loader.load_processed_data_gbdt()")
 
 # Clean up any temp directories if they exist
-for data_file in ['train_t', 'train_v']:
+for data_file in ['train_t', 'train_v', 'train_c']:
     temp_subdir = f'{CONFIG.temp_dir}_{data_file}'
     if os.path.exists(temp_subdir):
         try:

@@ -3,14 +3,18 @@ import argparse
 import csv
 import json
 import os
+import pickle
 from datetime import datetime
 
 # Third-party libraries
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
 from lightning.fabric import Fabric
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -18,6 +22,36 @@ from tqdm import tqdm
 from data_loader import ClickDatasetDNN, collate_fn_dnn_train, load_processed_dnn_data
 from mixup import mixup_batch_torch
 from utils import calculate_competition_score, seed_everything
+
+# ============================================================================
+# Calibration Classes
+# ============================================================================
+
+class TemperatureScaling:
+    """Temperature scaling for calibration"""
+    def __init__(self):
+        self.temperature = 1.0
+    
+    def fit(self, logits, labels):
+        """Find optimal temperature using validation set"""
+        from scipy.optimize import minimize
+        
+        def nll_loss(temp):
+            scaled_logits = logits / temp
+            probs = 1 / (1 + np.exp(-scaled_logits))
+            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+            loss = -np.mean(labels * np.log(probs) + (1 - labels) * np.log(1 - probs))
+            return loss
+        
+        result = minimize(nll_loss, x0=1.0, bounds=[(0.1, 10.0)], method='L-BFGS-B')
+        self.temperature = result.x[0]
+        print(f"      Optimal temperature: {self.temperature:.4f}")
+    
+    def predict_proba(self, logits):
+        """Apply temperature scaling"""
+        scaled_logits = logits / self.temperature
+        probs = 1 / (1 + np.exp(-scaled_logits))
+        return probs
 
 # Default configuration
 DEFAULT_CFG = {
@@ -35,6 +69,7 @@ DEFAULT_CFG = {
     'USE_MIXUP': True,
     'MIXUP_ALPHA': 0.4,
     'MIXUP_PROB': 0.3,
+    'CALIBRATION_METHOD': 'sigmoid',  # Calibration method: 'none', 'isotonic', 'sigmoid', or 'temperature'
     # Model architecture
     'MODEL': {
         'EMB_DIM': 32,
@@ -78,6 +113,10 @@ def merge_configs(default_cfg, yaml_cfg):
         cfg['MIXUP_ALPHA'] = yaml_cfg['MIXUP_ALPHA']
     if 'MIXUP_PROB' in yaml_cfg:
         cfg['MIXUP_PROB'] = yaml_cfg['MIXUP_PROB']
+    
+    # Update calibration method
+    if 'CALIBRATION_METHOD' in yaml_cfg:
+        cfg['CALIBRATION_METHOD'] = yaml_cfg['CALIBRATION_METHOD']
     
     # Update model architecture parameters
     if 'MODEL' in yaml_cfg:
@@ -290,20 +329,20 @@ fabric.print("데이터 로드 시작 (pre-processed 데이터 사용)")
 
 # Load pre-processed data from dataset_split_and_preprocess.py
 # These are already processed (continuous standardized, seq 결측치 처리됨)
-train_df = load_processed_dnn_data("data/proc_train_t")
-val_df = load_processed_dnn_data("data/proc_train_v")
-cal_df = load_processed_dnn_data("data/proc_train_c")
+train_t_df = load_processed_dnn_data("data/proc_train_t")
+train_v_df = load_processed_dnn_data("data/proc_train_v")
+train_c_df = load_processed_dnn_data("data/proc_train_c")
 
-fabric.print(f"Train shape: {train_df.shape}")
-fabric.print(f"Val shape: {val_df.shape}")
-fabric.print(f"Cal shape: {cal_df.shape}")
+fabric.print(f"Train_t shape: {train_t_df.shape}")
+fabric.print(f"Train_v shape: {train_v_df.shape}")
+fabric.print(f"Train_c shape: {train_c_df.shape}")
 fabric.print("데이터 로드 완료 (continuous standardized, seq 결측치 처리됨)")
 
 target_col = "clicked"
 seq_col = "seq"
 # l_feat_20, l_feat_23은 dataset_split_and_preprocess.py에서 이미 제거됨
 FEATURE_EXCLUDE = {target_col, seq_col, "ID"}
-feature_cols = [c for c in train_df.columns if c not in FEATURE_EXCLUDE]
+feature_cols = [c for c in train_t_df.columns if c not in FEATURE_EXCLUDE]
 
 # Categorical columns (based on analysis/results/feature_classification.json)
 cat_cols = ["gender", "age_group", "inventory_id"]
@@ -316,9 +355,9 @@ cat_cardinalities = {}
 for col in cat_cols:
     # Get max value across all splits to determine cardinality
     max_val = max(
-        train_df[col].max(),
-        val_df[col].max(),
-        cal_df[col].max()
+        train_t_df[col].max(),
+        train_v_df[col].max(),
+        train_c_df[col].max()
     )
     # Cardinality = max_index + 1 (since 0-based indexing)
     cat_cardinalities[col] = int(max_val) + 1
@@ -326,15 +365,72 @@ for col in cat_cols:
 fabric.print("범주형 피처 이미 인코딩됨 (Categorify by NVTabular)")
 fabric.print(f"Categorical cardinalities: {cat_cardinalities}")
 
+# ============================================================================
+# Split train_c for Calibration
+# ============================================================================
 if fabric.global_rank == 0:
-    total_samples = len(train_df) + len(val_df) + len(cal_df)
-    print(f"\n✅ Pre-split 데이터 사용 (train_t / train_v / train_c)")
-    print(f"Train set: {len(train_df):,} samples ({len(train_df)/total_samples:.1%})")
-    print(f"Val set: {len(val_df):,} samples ({len(val_df)/total_samples:.1%})")
-    print(f"Cal set: {len(cal_df):,} samples ({len(cal_df)/total_samples:.1%})")
-    print(f"Train positive ratio: {train_df[target_col].mean():.4f}")
-    print(f"Val positive ratio: {val_df[target_col].mean():.4f}")
-    print(f"Cal positive ratio: {cal_df[target_col].mean():.4f}")
+    print("\n" + "="*70)
+    print("🔀 Splitting train_c for Calibration")
+    print("="*70)
+
+# Split train_c into calibration set and additional training set
+train_c_targets = train_c_df[target_col].values
+pos_idx = np.where(train_c_targets == 1)[0]
+neg_idx = np.where(train_c_targets == 0)[0]
+
+if fabric.global_rank == 0:
+    print(f"   train_c total: {len(train_c_df):,} samples")
+    print(f"   Positive: {len(pos_idx):,}, Negative: {len(neg_idx):,}")
+
+# Sample half of positive samples for calibration
+np.random.seed(42)
+n_pos_cal = len(pos_idx) // 2
+pos_cal_idx = np.random.choice(pos_idx, size=n_pos_cal, replace=False)
+pos_train_idx = np.setdiff1d(pos_idx, pos_cal_idx)
+
+# Sample same number of negative samples for calibration
+neg_cal_idx = np.random.choice(neg_idx, size=n_pos_cal, replace=False)
+neg_train_idx = np.setdiff1d(neg_idx, neg_cal_idx)
+
+cal_idx = np.concatenate([pos_cal_idx, neg_cal_idx])
+train_c_remaining_idx = np.concatenate([pos_train_idx, neg_train_idx])
+
+# Create calibration dataframe
+cal_df = train_c_df.iloc[cal_idx].reset_index(drop=True)
+
+# Create remaining train_c for training
+train_c_remaining_df = train_c_df.iloc[train_c_remaining_idx].reset_index(drop=True)
+
+if fabric.global_rank == 0:
+    print(f"\n   → Calibration set: {len(cal_df):,} samples")
+    print(f"      Positive: {len(pos_cal_idx):,}, Negative: {len(neg_cal_idx):,}")
+    print(f"      Positive ratio: {cal_df[target_col].mean():.6f}")
+    
+    print(f"\n   → Remaining train_c: {len(train_c_remaining_df):,} samples")
+    print(f"      Positive: {len(pos_train_idx):,}, Negative: {len(neg_train_idx):,}")
+    print(f"      Positive ratio: {train_c_remaining_df[target_col].mean():.6f}")
+
+# ============================================================================
+# Combine train_t + train_v + remaining train_c for full training
+# ============================================================================
+if fabric.global_rank == 0:
+    print("\n" + "="*70)
+    print("🔗 Combining Training Data")
+    print("="*70)
+
+train_df = pd.concat([train_t_df, train_v_df, train_c_remaining_df], ignore_index=True)
+# Use calibration set as validation for early stopping
+val_df = cal_df
+
+if fabric.global_rank == 0:
+    total_samples = len(train_t_df) + len(train_v_df) + len(train_c_df)
+    print(f"   Combined training set: {len(train_df):,} samples")
+    print(f"      From train_t: {len(train_t_df):,}")
+    print(f"      From train_v: {len(train_v_df):,}")
+    print(f"      From train_c: {len(train_c_remaining_df):,}")
+    print(f"   Combined positive ratio: {train_df[target_col].mean():.6f}")
+    print(f"\n   Using calibration set ({len(cal_df):,} samples) as validation for early stopping")
+    print(f"   Cal positive ratio: {cal_df[target_col].mean():.6f}")
 
 # Normalization statistics not needed - data is already standardized
 # Pass empty dict to ClickDatasetDNN (it will skip standardization)
@@ -558,6 +654,80 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, t
     
     fabric.print("학습 완료")
     
+    # ========================================================================
+    # Train Calibrator (only rank 0)
+    # ========================================================================
+    calibrator = None
+    calibration_method = config.get('CALIBRATION_METHOD', 'none')
+    
+    if fabric.global_rank == 0 and calibration_method != 'none':
+        print("\n" + "="*70)
+        print("🎯 Training Calibrator")
+        print("="*70)
+        print(f"   Method: {calibration_method}")
+        
+        # Load best model for calibration
+        checkpoint = torch.load(f'{save_dir}/best_model_temp.pt', map_location=fabric.device)
+        model_for_cal = model.module if hasattr(model, 'module') else model
+        model_for_cal.load_state_dict(checkpoint['model_state_dict'])
+        model_for_cal.eval()
+        
+        # Collect predictions on calibration set
+        print(f"   Collecting predictions on calibration set...")
+        cal_logits = []
+        cal_preds = []
+        cal_targets = []
+        
+        with torch.no_grad():
+            for num_x, cat_x, seqs, lens, ys in cal_loader:
+                logits = model_for_cal(num_x, cat_x, seqs, lens)
+                preds = torch.sigmoid(logits)
+                
+                cal_logits.append(logits.cpu().numpy())
+                cal_preds.append(preds.cpu().numpy())
+                cal_targets.append(ys.cpu().numpy())
+        
+        cal_logits = np.concatenate(cal_logits)
+        cal_preds = np.concatenate(cal_preds)
+        cal_targets = np.concatenate(cal_targets)
+        
+        # Train calibrator
+        print(f"   Fitting {calibration_method} calibrator...")
+        
+        if calibration_method == 'temperature':
+            calibrator = TemperatureScaling()
+            calibrator.fit(cal_logits, cal_targets)
+            
+            calibrated_preds = calibrator.predict_proba(cal_logits)
+            
+        elif calibration_method == 'isotonic':
+            calibrator = IsotonicRegression(out_of_bounds='clip')
+            calibrator.fit(cal_preds, cal_targets)
+            
+            calibrated_preds = calibrator.predict(cal_preds)
+            
+        elif calibration_method == 'sigmoid':
+            calibrator = LogisticRegression()
+            calibrator.fit(cal_preds.reshape(-1, 1), cal_targets)
+            
+            calibrated_preds = calibrator.predict_proba(cal_preds.reshape(-1, 1))[:, 1]
+        
+        else:
+            print(f"   ⚠️  Unknown calibration method: {calibration_method}")
+            calibrated_preds = cal_preds
+        
+        # Evaluate calibrated predictions
+        if calibrator is not None:
+            cal_score, cal_ap, cal_wll = calculate_competition_score(cal_targets, calibrated_preds)
+            raw_score, raw_ap, raw_wll = calculate_competition_score(cal_targets, cal_preds)
+            
+            print(f"\n   📊 Calibrated Results:")
+            print(f"      Score: {cal_score:.6f} (raw: {raw_score:.6f}, Δ: {cal_score - raw_score:+.6f})")
+            print(f"      AP: {cal_ap:.6f} (raw: {raw_ap:.6f}, Δ: {cal_ap - raw_ap:+.6f})")
+            print(f"      WLL: {cal_wll:.6f} (raw: {raw_wll:.6f}, Δ: {cal_wll - raw_wll:+.6f})")
+        
+        print("="*70)
+    
     # Save model and metadata (only rank 0)
     if fabric.global_rank == 0:
         print(f"\n학습 완료! Best validation score: {best_score:.6f}")
@@ -575,6 +745,13 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, t
         print(f"✅ Categorical cardinalities saved to {cardinalities_path}")
         print(f"   {cat_cardinalities}")
         
+        # Save calibrator if exists
+        if calibrator is not None:
+            calibrator_path = os.path.join(save_dir, 'calibrator.pkl')
+            with open(calibrator_path, 'wb') as f:
+                pickle.dump(calibrator, f)
+            print(f"✅ Calibrator saved to {calibrator_path}")
+        
         # Save metadata (including model architecture config)
         metadata = {
             'model_name': 'dnn',
@@ -585,6 +762,7 @@ def train_model(fabric, train_df, val_df, cal_df, num_cols, cat_cols, seq_col, t
             'use_mixup': use_mixup,
             'mixup_alpha': mixup_alpha if use_mixup else None,
             'mixup_prob': mixup_prob if use_mixup else None,
+            'calibration_method': calibration_method,
             'timestamp': timestamp,
             'num_features': len(num_cols),
             'cat_features': cat_cols,
@@ -636,10 +814,11 @@ if fabric.global_rank == 0 and save_dir:
     print("TRAINING COMPLETE!")
     print("🎉"*35)
     print(f"\n✅ Best validation score: {best_score:.6f}")
+    print(f"✅ Calibration method: {CFG['CALIBRATION_METHOD']}")
     print(f"✅ Models saved to: {save_dir}")
-    print(f"✅ Train/Val/Cal split: {CFG['TRAIN_RATIO']:.1%}/{CFG['VAL_RATIO']:.1%}/{CFG['CAL_RATIO']:.1%}")
+    print(f"✅ Training data: train_t + train_v + train_c (remaining)")
+    print(f"✅ Calibration data: train_c (balanced subset)")
     print(f"✅ Training log: {save_dir}/training_log.csv")
-    print(f"✅ Note: Calibration will be performed during prediction (pred_dnn_ddp.py)")
     print(f"\n📐 Model Architecture Used:")
     print(f"   Embedding Dim: {CFG['MODEL']['EMB_DIM']}")
     print(f"   LSTM Hidden: {CFG['MODEL']['LSTM_HIDDEN']}")

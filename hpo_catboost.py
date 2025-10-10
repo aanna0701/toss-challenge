@@ -127,8 +127,13 @@ class TemperatureScaling:
         return probs
 
 def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
-              early_stopping_rounds=20, task_type='GPU', use_mixup=True, scale_pos_weight=1.0):
+              early_stopping_rounds=20, task_type='GPU', use_mixup=True, scale_pos_weight=1.0,
+              bootstrap_types=None):
     """Optuna objective function for CatBoost with calibration (GPU-optimized)"""
+    
+    # Default bootstrap types if not specified
+    if bootstrap_types is None:
+        bootstrap_types = ['Bernoulli', 'Bayesian', 'MVS']
     
     # 데이터 샘플링 없이 전체 사용 (파라미터 최적화로 메모리 관리)
     X_train_sampled = X_train_orig
@@ -147,8 +152,8 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
         # GPU 메모리 최적화: depth를 낮게 유지 (메모리에 가장 큰 영향)
         'depth': trial.suggest_int('depth', 4, 16),
-        # Bootstrap type
-        'bootstrap_type': trial.suggest_categorical('bootstrap_type', ['Bernoulli', 'Bayesian', 'MVS']),
+        # Bootstrap type (user-specified types)
+        'bootstrap_type': trial.suggest_categorical('bootstrap_type', bootstrap_types),
         'subsample': trial.suggest_float('subsample', 0.1, 1.0),  # 트리당 샘플링
         
         # 🔧 GPU 메모리 최적화 파라미터 (전체 데이터용)
@@ -168,6 +173,9 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
     # CPU에서만 colsample_bylevel 사용
     if task_type == 'CPU':
         params['colsample_bylevel'] = trial.suggest_float('colsample_bylevel', 0.5, 1.0)
+        
+    if params['bootstrap_type'] == 'Bayesian':
+        del params['subsample']
     
     # Calibration method
     calibration_method = trial.suggest_categorical('calibration_method', ['none', 'temperature', 'sigmoid'])
@@ -281,12 +289,19 @@ def objective(trial, X_train_orig, y_train_orig, X_val, y_val, X_cal, y_cal,
     return score
 
 def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
-                     early_stopping_rounds=20, timeout=None, task_type='GPU', use_mixup=True):
+                     early_stopping_rounds=20, timeout=None, task_type='GPU', use_mixup=True,
+                     bootstrap_types=None):
     """Run Optuna optimization using pre-processed data (GPU-handle-safe)"""
+    
+    # Default bootstrap types if not specified
+    if bootstrap_types is None:
+        bootstrap_types = ['Bernoulli', 'Bayesian', 'MVS']
+    
     print("\n" + "="*70)
     print("🔍 CatBoost Hyperparameter Optimization with Optuna")
     print("="*70)
     print(f"   MixUp enabled: {use_mixup}")
+    print(f"   Bootstrap types: {', '.join(bootstrap_types)}")
     
     # Load train_t (training data, drop seq for GBDT)
     print(f"\n📦 Loading training data from {train_t_path}...")
@@ -337,7 +352,8 @@ def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
     study.optimize(
         lambda trial: objective(
             trial, X_train, y_train, X_val, y_val, X_cal, y_cal,
-            early_stopping_rounds, task_type, use_mixup, scale_pos_weight
+            early_stopping_rounds, task_type, use_mixup, scale_pos_weight,
+            bootstrap_types
         ),
         n_trials=n_trials,
         timeout=timeout,
@@ -366,8 +382,20 @@ def run_optimization(train_t_path, train_v_path, train_c_path, n_trials=100,
     return study
 
 def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml', 
-                              original_config_path='config_GBDT.yaml'):
+                              original_config_path='config_GBDT.yaml',
+                              bootstrap_types=None):
     """Save best parameters to YAML config"""
+    
+    # Add bootstrap_types suffix to output path
+    if bootstrap_types:
+        bootstrap_suffix = '_'.join(bootstrap_types)
+        # Insert bootstrap types before file extension
+        path_parts = output_path.rsplit('.', 1)
+        if len(path_parts) == 2:
+            output_path = f"{path_parts[0]}_{bootstrap_suffix}.{path_parts[1]}"
+        else:
+            output_path = f"{output_path}_{bootstrap_suffix}"
+    
     print(f"\n💾 Saving best parameters to {output_path}...")
     
     with open(original_config_path, 'r', encoding='utf-8') as f:
@@ -404,9 +432,10 @@ def save_best_params_to_yaml(study, output_path='config_GBDT_optimized.yaml',
     config['catboost']['thread_count'] = -1
     config['catboost']['random_state'] = 42
     
-    with open(output_path.replace('.yaml', '_catboost_best.yaml'), 'w', encoding='utf-8') as f:
+    final_output_path = output_path.replace('.yaml', '_catboost_best.yaml')
+    with open(final_output_path, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-    print(f"   ✅ Saved to {output_path}")
+    print(f"   ✅ Saved to {final_output_path}")
 
 def main():
     parser = argparse.ArgumentParser(description='CatBoost Hyperparameter Optimization')
@@ -427,6 +456,10 @@ def main():
                         help='Task type for CatBoost (default: GPU)')
     parser.add_argument('--use-mixup', action='store_true', default=False,
                         help='Enable MixUp data augmentation (default: False, GPU 메모리 절약)')
+    parser.add_argument('--bootstrap-types', type=str, nargs='+', 
+                        choices=['Bernoulli', 'Bayesian', 'MVS'],
+                        default=['Bernoulli', 'Bayesian', 'MVS'],
+                        help='Bootstrap types to explore (default: all three types)')
     parser.add_argument('--output-config', type=str, default='config_optimized.yaml',
                         help='Output config file path (default: config_optimized.yaml)')
     parser.add_argument('--original-config', type=str, default='config_GBDT.yaml',
@@ -442,6 +475,7 @@ def main():
     print(f"   Early stopping: {args.early_stopping_rounds}")
     print(f"   Task type: {args.task_type}")
     print(f"   Use MixUp: {args.use_mixup}")
+    print(f"   Bootstrap types: {', '.join(args.bootstrap_types)}")
     print(f"   Timeout: {args.timeout if args.timeout else 'None'}")
     
     # Run optimization
@@ -453,21 +487,34 @@ def main():
         early_stopping_rounds=args.early_stopping_rounds,
         timeout=args.timeout,
         task_type=args.task_type,
-        use_mixup=args.use_mixup
+        use_mixup=args.use_mixup,
+        bootstrap_types=args.bootstrap_types
     )
     
     # Save results
     save_best_params_to_yaml(
         study, 
         output_path=args.output_config,
-        original_config_path=args.original_config
+        original_config_path=args.original_config,
+        bootstrap_types=args.bootstrap_types
     )
+    
+    # Generate final config name with bootstrap types
+    if args.bootstrap_types:
+        bootstrap_suffix = '_'.join(args.bootstrap_types)
+        path_parts = args.output_config.rsplit('.', 1)
+        if len(path_parts) == 2:
+            final_config_name = f"{path_parts[0]}_{bootstrap_suffix}_catboost_best.{path_parts[1]}"
+        else:
+            final_config_name = f"{args.output_config}_{bootstrap_suffix}_catboost_best"
+    else:
+        final_config_name = args.output_config.replace('.yaml', '_catboost_best.yaml')
     
     print("\n" + "🎉"*35)
     print("OPTIMIZATION COMPLETE!")
     print("🎉"*35)
     print(f"\n✅ Best score: {study.best_value:.6f}")
-    print(f"✅ Config saved to: {args.output_config}")
+    print(f"✅ Config saved to: {final_config_name}")
     print("="*70)
 
 if __name__ == '__main__':
